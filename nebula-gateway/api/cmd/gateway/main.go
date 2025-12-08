@@ -36,8 +36,13 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler(cfg))
 
-	initStateContract(mux, cfg, fabricClient)
-	initJobContract(mux, cfg, fabricClient)
+	authenticator, err := common.NewAuthenticator(cfg.AuthSecret)
+	if err != nil {
+		log.Fatalf("failed to initialize authenticator: %v", err)
+	}
+
+	initStateContract(mux, cfg, fabricClient, authenticator)
+	initJobContract(mux, cfg, fabricClient, authenticator)
 	initDIDContract(mux)
 	initNationContract(mux)
 
@@ -57,18 +62,18 @@ func main() {
 	log.Fatal(srv.ListenAndServe())
 }
 
-func initJobContract(mux *http.ServeMux, cfg *common.Config, fabric *common.FabricClient) {
+func initJobContract(mux *http.ServeMux, cfg *common.Config, fabric *common.FabricClient, auth *common.Authenticator) {
 	transport := jobtransport.NewTransport(fabric)
 	svc := jobservice.NewService(transport)
 	handler := jobcontroller.NewHandler(cfg, svc)
-	handler.RegisterRoutes(mux)
+	handler.RegisterRoutes(mux, auth)
 }
 
-func initStateContract(mux *http.ServeMux, cfg *common.Config, fabric *common.FabricClient) {
+func initStateContract(mux *http.ServeMux, cfg *common.Config, fabric *common.FabricClient, auth *common.Authenticator) {
 	transport := statetransport.NewTransport(fabric)
 	svc := stateservice.NewService(transport)
 	handler := statecontroller.NewHandler(cfg, svc)
-	handler.RegisterRoutes(mux)
+	handler.RegisterRoutes(mux, auth)
 }
 
 func initDIDContract(mux *http.ServeMux) {
@@ -87,10 +92,9 @@ func initNationContract(mux *http.ServeMux) {
 
 func healthHandler(cfg *common.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		peer := cfg.ResolvePeer(r.URL.Query().Get("peer"))
 		common.WriteJSON(w, http.StatusOK, map[string]string{
-			"status": "ok",
-			"peer":   peer,
+			"status":      "ok",
+			"defaultPeer": cfg.DefaultPeer,
 		})
 	}
 }

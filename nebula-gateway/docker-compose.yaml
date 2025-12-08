@@ -182,6 +182,8 @@ services:
       - ORDERER_TLS_CA=/organizations/ordererOrganizations/nebula.com/orderers/orderer.nebula.com/msp/tlscacerts/tlsca.nebula.com-cert.pem
       - PEER_ENDPOINTS=peer0=peer0.org1.nebula.com:7051,peer1=peer1.org1.nebula.com:8051,peer2=peer2.org1.nebula.com:9051
       - FABRIC_CFG_PATH=/etc/hyperledger/fabric
+      - STATE_PEER_ROUTES=${STATE_PEER_ROUTES:-state-1=peer0|peer1,state-2=peer1|peer2}
+      - AUTH_JWT_SECRET=${AUTH_JWT_SECRET:-replace-me}
     volumes:
       - ./organizations:/organizations:ro
     depends_on:

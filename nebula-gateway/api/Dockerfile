@@ -2,7 +2,7 @@ FROM golang:1.20 as builder
 WORKDIR /workspace
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 COPY go.mod ./
-COPY cmd ./cmd
+COPY . .
 RUN go build -o gateway ./cmd/gateway
 
 FROM hyperledger/fabric-tools:2.5

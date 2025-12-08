@@ -17,8 +17,12 @@ From the repository root:
 
 ```bash
 cd nebula-gateway
+STATE_PEER_ROUTES="state-1=peer0|peer1,state-2=peer1|peer2" \
+AUTH_JWT_SECRET="replace-me" \
 DOCKER_BUILDKIT=1 docker compose up --build
 ```
+
+The compose file also honours variables defined in a `.env` file or your shell environment, so you can export them once instead of prefixing every command.
 
 The compose file brings up the Fabric network, configures the channel (`nebulachannel` by default), deploys the `basic` chaincode, and finally starts the REST gateway on port `9000`. The gateway process now waits until the channel exists and peers have joined before binding the HTTP port, so you won’t accidentally hit it while the network is still bootstrapping.
 
@@ -28,28 +32,69 @@ Stop and clean up with:
 docker compose down -v
 ```
 
+## Gateway environment variables
+
+| Variable | Default in compose | Purpose |
+| --- | --- | --- |
+| `FABRIC_CHANNEL` | `nebulachannel` | Fabric channel the gateway targets |
+| `FABRIC_CHAINCODE` | `basic` | Chaincode name |
+| `MSP_ID` | `Org1MSP` | MSP ID used by the gateway identity |
+| `ORG_CRYPTO_PATH` | `/organizations/peerOrganizations/org1.nebula.com` | Base path for mounted MSP material |
+| `ADMIN_IDENTITY` | `Admin@org1.nebula.com` | Gateway signing identity |
+| `ORDERER_ENDPOINT` | `orderer.nebula.com:7050` | Orderer endpoint used for submits |
+| `ORDERER_TLS_CA` | `/organizations/ordererOrganizations/.../tlsca.nebula.com-cert.pem` | Orderer TLS CA |
+| `ORG_DOMAIN` | `org1.nebula.com` | Used to derive peer TLS paths |
+| `PEER_ENDPOINTS` | `peer0=...7051,peer1=...8051,peer2=...9051` | Map of peer names to gRPC endpoints |
+| `FABRIC_CFG_PATH` | `/etc/hyperledger/fabric` | Fabric config path for CLI |
+| `STATE_PEER_ROUTES` | `state-1=peer0\|peer1,state-2=peer1\|peer2` | Route table mapping each state to ≥2 peers (round-robin selection) |
+| `AUTH_JWT_SECRET` | `replace-me` (development only) | Shared HS256 secret used to validate JWTs |
+
+Override any value by exporting it before `docker compose up` or adding it to `.env`.
+
 ## API Gateway
 
 Base URL: `http://localhost:9000`
 
-Every GET/POST request accepts a `peer` query parameter (`peer0`, `peer1`, `peer2`). If omitted or unknown, `peer0` is used. Each peer has its own TLS root cert mounted into the container so the gateway can target a specific NEBULA handler when committing data.
+All Fabric-backed endpoints require a Bearer token and the gateway selects the peer internally using the `state` claim embedded in the JWT, so the caller never chooses the peer explicitly.
+
+### Authentication & authorization
+
+* Every request must include `Authorization: Bearer <JWT>`. The token must be signed with the shared `AUTH_JWT_SECRET` using HS256 and include `sub`, `state`, `role`, and `exp` claims (Unix seconds).
+* Allowed roles: `trainer`, `aggregator`, `admin`. All roles can `GET` the genesis model endpoints while only `admin` is allowed to `POST`.
+* The gateway consults `STATE_PEER_ROUTES` to decide which Fabric peer to hit for a given `state`, using round-robin across the configured list.
+
+To mint a test token once you know `AUTH_JWT_SECRET`:
+
+```bash
+SECRET="replace-me" node -e '
+const crypto=require("crypto");
+const b=v=>Buffer.from(JSON.stringify(v)).toString("base64url");
+const header={alg:"HS256",typ:"JWT"};
+const payload={sub:"node-123",state:"state-1",role:"admin",exp:Math.floor(Date.now()/1000)+3600};
+const unsigned=`${b(header)}.${b(payload)}`;
+const sig=crypto.createHmac("sha256",process.env.SECRET).update(unsigned).digest("base64url");
+console.log(`${unsigned}.${sig}`);
+'
+```
+
+Use the output as the Bearer token in Postman/cURL.
 
 ### Health
 
 ```
-GET /health?peer=peer1
+GET /health
 ```
 
 Response:
 
 ```json
-{"status":"ok","peer":"peer1"}
+{"status":"ok","defaultPeer":"peer0"}
 ```
 
 ### List assets
 
 ```
-GET /assets?peer=peer2
+GET /assets
 ```
 
 Returns the JSON array from the `GetAllAssets` chaincode function running on the selected peer.
@@ -57,7 +102,7 @@ Returns the JSON array from the `GetAllAssets` chaincode function running on the
 ### Create an asset
 
 ```
-POST /assets?peer=peer0
+POST /assets
 Content-Type: application/json
 
 {
@@ -74,7 +119,7 @@ The gateway forwards the invocation to the requested peer and orderer using TLS 
 ### Job contract – genesis model CID
 
 ```
-POST /job-contract/genesis-model-cid?peer=peer0
+POST /job-contract/genesis-model-cid
 Content-Type: application/json
 
 {
@@ -87,7 +132,7 @@ Content-Type: application/json
 }
 ```
 
-`GET /job-contract/genesis-model-cid?jobId=credit-risk-v1&peer=peer2` returns the metadata that was recorded for that job, including the timestamp of the last update:
+`GET /job-contract/genesis-model-cid?jobId=credit-risk-v1` returns the metadata that was recorded for that job, including the timestamp of the last update:
 
 ```json
 {
@@ -104,7 +149,7 @@ Content-Type: application/json
 ### Job contract – genesis model hash
 
 ```
-POST /job-contract/genesis-model-hash?peer=peer1
+POST /job-contract/genesis-model-hash
 Content-Type: application/json
 
 {
@@ -117,7 +162,7 @@ Content-Type: application/json
 }
 ```
 
-`GET /job-contract/genesis-model-hash?jobId=credit-risk-v1&peer=peer1` returns the stored verification material:
+`GET /job-contract/genesis-model-hash?jobId=credit-risk-v1` returns the stored verification material:
 
 ```json
 {
@@ -131,6 +176,8 @@ Content-Type: application/json
 }
 ```
 
+For the full list of job contract endpoints (including the training configuration API) and their request/response schemas, see `api/internal/jobcontract/README.md`.
+
 ## Customisation
 
 - Adjust MSP/crypto paths or Fabric defaults (such as `FABRIC_CHANNEL`) via environment variables in `docker-compose.yaml`. Whatever channel name you choose must match the one created by the bootstrap container.
@@ -143,15 +190,25 @@ With this structure you can treat `docker compose up` as the single entry point 
 
 ### Chaincode updates
 
-Each time you change the Go chaincode you need to bump the chaincode version/sequence so Fabric will accept the new package. You can do this live without tearing down the network:
+Each time you change the Go chaincode you need to bump the chaincode version/sequence so Fabric will accept the new package. Rebuilding the API container alone is not enough; you must re-run the bootstrap script inside the CLI container so the peers install and approve the new definition. You can do this live without tearing down the network.
+
+To check what is currently committed on the channel:
 
 ```bash
-# example: move from v1.0/sequence 1 to v1.1/sequence 2
+cd nebula-gateway
 docker exec nebula-cli bash -c \
-  'CHAINCODE_VERSION=1.1 CHAINCODE_SEQUENCE=2 /scripts/bootstrap.sh'
+  'peer lifecycle chaincode querycommitted --channelID nebulachannel --name basic'
 ```
 
-The `bootstrap.sh` script reuses the existing channel and orderer, repackages the code into `chaincode/<name>_<version>.tar.gz`, installs it on all peers, approves, and commits the definition with the supplied version/sequence. Update the numbers again for the next change.
+Fabric will print the `Version` label and `Sequence` number. When you redeploy, increment the sequence by one (and pick a matching version label so the package name stays consistent), then rerun the bootstrap script:
+
+```bash
+# example: move from v1.2/sequence 3 to v1.3/sequence 4
+docker exec nebula-cli bash -c \
+  'CHAINCODE_VERSION=1.3 CHAINCODE_SEQUENCE=4 /scripts/bootstrap.sh'
+```
+
+The `bootstrap.sh` script reuses the existing channel and orderer, repackages the code into `chaincode/<name>_<version>.tar.gz`, installs it on all peers, approves, and commits the definition with the supplied version/sequence. Update the numbers again for the next change—run this command every time you modify anything under `chaincode/asset-transfer-basic`, otherwise the network will keep running the older chaincode and the gateway will report “function not found” errors for new transactions.
 
 ### API gateway rebuilds
 

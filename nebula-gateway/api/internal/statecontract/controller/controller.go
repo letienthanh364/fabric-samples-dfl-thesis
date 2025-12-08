@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -22,12 +23,21 @@ func NewHandler(cfg *common.Config, svc *service.Service) *Handler {
 }
 
 // RegisterRoutes mounts the /assets endpoint.
-func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/assets", h.handleAssets)
+func (h *Handler) RegisterRoutes(mux *http.ServeMux, auth *common.Authenticator) {
+	mux.Handle("/assets", auth.RequireAuth(http.HandlerFunc(h.handleAssets)))
 }
 
 func (h *Handler) handleAssets(w http.ResponseWriter, r *http.Request) {
-	peer := h.cfg.ResolvePeer(r.URL.Query().Get("peer"))
+	authCtx, ok := common.AuthContextFrom(r.Context())
+	if !ok {
+		common.WriteErrorWithCode(w, http.StatusUnauthorized, errors.New("authentication context missing"))
+		return
+	}
+	peer, err := h.cfg.PeerForState(authCtx.State)
+	if err != nil {
+		common.WriteErrorWithCode(w, http.StatusForbidden, err)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		assets, err := h.svc.ListAssets(r.Context(), peer)

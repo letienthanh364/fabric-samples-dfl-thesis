@@ -44,6 +44,39 @@ type GenesisModelHashRecord struct {
 	UpdatedAt     string `json:"updatedAt"`
 }
 
+// TrainingConfigRequest captures the parameters needed to configure a job's DFL run.
+type TrainingConfigRequest struct {
+	JobID            string  `json:"jobId"`
+	ModelName        string  `json:"modelName"`
+	ModelVersion     string  `json:"modelVersion"`
+	DatasetURI       string  `json:"datasetUri"`
+	Objective        string  `json:"objective"`
+	Description      string  `json:"description"`
+	RoundDurationSec int64   `json:"roundDurationSec"`
+	BatchSize        int64   `json:"batchSize"`
+	LearningRate     float64 `json:"learningRate"`
+	MaxClusterRounds int64   `json:"maxClusterRounds"`
+	MaxStateRounds   int64   `json:"maxStateRounds"`
+	Alpha            float64 `json:"alpha"`
+}
+
+// TrainingConfigRecord mirrors the configuration stored on-chain.
+type TrainingConfigRecord struct {
+	JobID            string  `json:"jobId"`
+	ModelName        string  `json:"modelName"`
+	ModelVersion     string  `json:"modelVersion,omitempty"`
+	DatasetURI       string  `json:"datasetUri"`
+	Objective        string  `json:"objective"`
+	Description      string  `json:"description,omitempty"`
+	RoundDurationSec int64   `json:"roundDurationSec"`
+	BatchSize        int64   `json:"batchSize"`
+	LearningRate     float64 `json:"learningRate"`
+	MaxClusterRounds int64   `json:"maxClusterRounds"`
+	MaxStateRounds   int64   `json:"maxStateRounds"`
+	Alpha            float64 `json:"alpha"`
+	UpdatedAt        string  `json:"updatedAt"`
+}
+
 func (r GenesisModelCIDRequest) Validate() error {
 	switch {
 	case r.JobID == "":
@@ -69,6 +102,33 @@ func (r GenesisModelHashRequest) Validate() error {
 		return errors.New("hashAlgorithm is required")
 	case r.ModelFormat == "":
 		return errors.New("modelFormat is required")
+	default:
+		return nil
+	}
+}
+
+func (r TrainingConfigRequest) Validate() error {
+	switch {
+	case r.JobID == "":
+		return errors.New("jobId is required")
+	case r.ModelName == "":
+		return errors.New("modelName is required")
+	case r.DatasetURI == "":
+		return errors.New("datasetUri is required")
+	case r.Objective == "":
+		return errors.New("objective is required")
+	case r.RoundDurationSec <= 0:
+		return errors.New("roundDurationSec must be greater than zero")
+	case r.BatchSize <= 0:
+		return errors.New("batchSize must be greater than zero")
+	case r.LearningRate <= 0:
+		return errors.New("learningRate must be greater than zero")
+	case r.MaxClusterRounds <= 0:
+		return errors.New("maxClusterRounds must be greater than zero")
+	case r.MaxStateRounds <= 0:
+		return errors.New("maxStateRounds must be greater than zero")
+	case r.Alpha <= 0:
+		return errors.New("alpha must be greater than zero")
 	default:
 		return nil
 	}

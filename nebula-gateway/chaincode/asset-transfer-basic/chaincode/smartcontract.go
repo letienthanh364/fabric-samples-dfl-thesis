@@ -3,6 +3,7 @@ package chaincode
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/hyperledger/fabric-contract-api-go/v2/contractapi"
@@ -25,8 +26,9 @@ type Asset struct {
 }
 
 const (
-	genesisModelCIDPrefix  = "job-contract:genesis-cid:"
-	genesisModelHashPrefix = "job-contract:genesis-hash:"
+	genesisModelCIDPrefix     = "job-contract:genesis-cid:"
+	genesisModelHashPrefix    = "job-contract:genesis-hash:"
+	trainingConfigStatePrefix = "job-contract:training-config:"
 )
 
 // GenesisModelCID keeps the metadata that points to the canonical genesis model artifact.
@@ -49,6 +51,23 @@ type GenesisModelHash struct {
 	Compression     string `json:"compression,omitempty"`
 	Notes           string `json:"notes,omitempty"`
 	LastUpdatedTime string `json:"updatedAt"`
+}
+
+// TrainingConfig captures how a federated job should be executed.
+type TrainingConfig struct {
+	JobID            string  `json:"jobId"`
+	ModelName        string  `json:"modelName"`
+	ModelVersion     string  `json:"modelVersion,omitempty"`
+	DatasetURI       string  `json:"datasetUri"`
+	Objective        string  `json:"objective"`
+	Description      string  `json:"description,omitempty"`
+	RoundDurationSec int64   `json:"roundDurationSec"`
+	BatchSize        int64   `json:"batchSize"`
+	LearningRate     float64 `json:"learningRate"`
+	MaxClusterRounds int64   `json:"maxClusterRounds"`
+	MaxStateRounds   int64   `json:"maxStateRounds"`
+	Alpha            float64 `json:"alpha"`
+	LastUpdatedTime  string  `json:"updatedAt"`
 }
 
 // InitLedger adds a base set of assets to the ledger
@@ -332,12 +351,103 @@ func (s *SmartContract) GetGenesisModelHash(ctx contractapi.TransactionContextIn
 	return &record, nil
 }
 
+// UpsertTrainingConfig stores or updates the training plan for a job.
+func (s *SmartContract) UpsertTrainingConfig(ctx contractapi.TransactionContextInterface, jobID, modelName, modelVersion, datasetURI, objective, description, roundDurationSecStr, batchSizeStr, learningRateStr, maxClusterRoundsStr, maxStateRoundsStr, alphaStr string) error {
+	if jobID == "" {
+		return fmt.Errorf("jobId is required")
+	}
+	if modelName == "" {
+		return fmt.Errorf("modelName is required")
+	}
+	if datasetURI == "" {
+		return fmt.Errorf("datasetUri is required")
+	}
+	if objective == "" {
+		return fmt.Errorf("objective is required")
+	}
+
+	roundDurationSec, err := parsePositiveInt(roundDurationSecStr, "roundDurationSec")
+	if err != nil {
+		return err
+	}
+	batchSize, err := parsePositiveInt(batchSizeStr, "batchSize")
+	if err != nil {
+		return err
+	}
+	maxClusterRounds, err := parsePositiveInt(maxClusterRoundsStr, "maxClusterRounds")
+	if err != nil {
+		return err
+	}
+	maxStateRounds, err := parsePositiveInt(maxStateRoundsStr, "maxStateRounds")
+	if err != nil {
+		return err
+	}
+	learningRate, err := parsePositiveFloat(learningRateStr, "learningRate")
+	if err != nil {
+		return err
+	}
+	alpha, err := parsePositiveFloat(alphaStr, "alpha")
+	if err != nil {
+		return err
+	}
+
+	timestamp, err := txTimeRFC3339(ctx)
+	if err != nil {
+		return err
+	}
+
+	record := TrainingConfig{
+		JobID:            jobID,
+		ModelName:        modelName,
+		ModelVersion:     modelVersion,
+		DatasetURI:       datasetURI,
+		Objective:        objective,
+		Description:      description,
+		RoundDurationSec: roundDurationSec,
+		BatchSize:        batchSize,
+		LearningRate:     learningRate,
+		MaxClusterRounds: maxClusterRounds,
+		MaxStateRounds:   maxStateRounds,
+		Alpha:            alpha,
+		LastUpdatedTime:  timestamp,
+	}
+
+	payload, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return ctx.GetStub().PutState(trainingConfigKey(jobID), payload)
+}
+
+// GetTrainingConfig returns the stored training config for a jobID.
+func (s *SmartContract) GetTrainingConfig(ctx contractapi.TransactionContextInterface, jobID string) (*TrainingConfig, error) {
+	if jobID == "" {
+		return nil, fmt.Errorf("jobId is required")
+	}
+	payload, err := ctx.GetStub().GetState(trainingConfigKey(jobID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read training config: %w", err)
+	}
+	if payload == nil {
+		return nil, fmt.Errorf("training config for %s does not exist", jobID)
+	}
+	var record TrainingConfig
+	if err := json.Unmarshal(payload, &record); err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
 func genesisModelCIDKey(jobID string) string {
 	return genesisModelCIDPrefix + jobID
 }
 
 func genesisModelHashKey(jobID string) string {
 	return genesisModelHashPrefix + jobID
+}
+
+func trainingConfigKey(jobID string) string {
+	return trainingConfigStatePrefix + jobID
 }
 
 func txTimeRFC3339(ctx contractapi.TransactionContextInterface) (string, error) {
@@ -348,4 +458,26 @@ func txTimeRFC3339(ctx contractapi.TransactionContextInterface) (string, error) 
 	seconds := ts.GetSeconds()
 	nanos := ts.GetNanos()
 	return time.Unix(seconds, int64(nanos)).UTC().Format(time.RFC3339Nano), nil
+}
+
+func parsePositiveInt(value, field string) (int64, error) {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a positive integer: %w", field, err)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("%s must be greater than zero", field)
+	}
+	return parsed, nil
+}
+
+func parsePositiveFloat(value, field string) (float64, error) {
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a positive number: %w", field, err)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("%s must be greater than zero", field)
+	}
+	return parsed, nil
 }

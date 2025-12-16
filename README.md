@@ -2,6 +2,8 @@
 
 # Hyperledger Fabric Samples
 
+[➡️ **Working on the API Gateway? Start with `api-gateway/README.md` for detailed setup instructions, including environment configuration and trainer enrollment.**](api-gateway/README.md)
+
 You can use Fabric samples to get started working with Hyperledger Fabric, explore important Fabric features, and learn how to build applications that can interact with blockchain networks using the Fabric SDKs. To learn more about Hyperledger Fabric, visit the [Fabric documentation](https://hyperledger-fabric.readthedocs.io/en/latest).
 
 Note that this branch contains samples for the latest Fabric release. For older Fabric versions, refer to the corresponding branches:

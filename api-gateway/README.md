@@ -11,6 +11,14 @@ This directory clones the former `nebula-gateway` deployment and trims it down t
 
 Follow these steps the first time you spin up the stack:
 
+0. **Environment file.** Copy `.env.example` to `.env` and edit the values:
+   ```bash
+   cd api-gateway
+   cp .env.example .env
+   # edit .env to set AUTH_JWT_SECRET and ADMIN_PUBLIC_KEY at minimum
+   ```
+   `AUTH_JWT_SECRET` secures `/auth/register-trainer`. `ADMIN_PUBLIC_KEY` must match the base64 Ed25519 key derived from your admin private key. All other entries already match the defaults used by `docker-compose.yaml`.
+
 1. **Generate the admin Ed25519 keypair** (used to sign VCs and populate `ADMIN_PUBLIC_KEY`).
    ```bash
    openssl genpkey -algorithm Ed25519 -out admin_ed25519_sk.pem

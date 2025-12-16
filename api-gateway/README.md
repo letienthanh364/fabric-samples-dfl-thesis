@@ -19,39 +19,35 @@ Follow these steps the first time you spin up the stack:
    ```
    Copy the single line from `admin_public_key.b64` into `.env` as `ADMIN_PUBLIC_KEY=...`. Keep `admin_ed25519_sk.pem` safe—you will use it to sign VCs.
 
-2. **Prepare trainer identities.** For every node that might participate:
-   - Create an MSP folder under `organizations/peerOrganizations/org1.nebula.com/users/<fabric-client-id>/msp`. The `<fabric-client-id>` must match `trainer-<nodeId>` once lowercased and sanitized (copy one of the sample users or enroll via Fabric CA).
-   - Generate an Ed25519 keypair that the trainer will use for runtime JWTs **and** as the `public_key` stored on-chain:
+2. **Prepare trainer identities (automated).**
+   - Each node definition now lives under `nodes-setup/nodes/node_X.json`. To generate Ed25519 keypairs, unsigned VC payloads, and both JWT flavors for *all* trainers, run:
      ```bash
-     openssl genpkey -algorithm Ed25519 -out trainer-node-001_sk.pem
-
-     openssl pkey -in trainer-node-001_sk.pem -pubout -outform DER | tail -c 32 | base64 > trainer-node-001_public_key.b64
+     cd api-gateway
+     # ensure AUTH_JWT_SECRET is exported or pass --auth-secret explicitly
+     AUTH_JWT_SECRET="super-secret" \
+     node scripts/generate-trainer-identities.js \
+       --generate-jwt registration,runtime \
+       --auth-secret "$AUTH_JWT_SECRET"
      ```
-     The base64 string goes into the `/auth/register-trainer` payload. Keep the private key PEM safe—it will be referenced as `TRAINER_PRIVATE_KEY` when minting JWTs.
+     This writes:
+     - Keys: `nodes-setup/keys/<trainer-id>_{sk,pk}.pem` + `<trainer-id>_public_key.b64`
+     - Unsigned VCs: `nodes-setup/vc-unsigned/<trainer-id>.json`
+     - JWTs (optional): `nodes-setup/tokens/<trainer-id>_{registration,runtime}.jwt`
+   - Copy the private key PEM (and optional runtime JWT) to the *actual machine* that will run that trainer node. These files must never be checked in or shared broadly; treat `nodes-setup/` as a staging area.
+   - Make sure each trainer still has MSP material under `organizations/peerOrganizations/org1.nebula.com/users/<fabric-client-id>/msp` where `<fabric-client-id>` matches the `trainer-xxx` naming convention.
 
-3. **Admin issues a VC for each trainer.** Build the helper tool and sign the credential JSON with the admin private key (`admin_ed25519_sk.pem`). The admin hands this signed VC to the trainer, who will include it during registration:
+3. **Admin issues signed VCs.** Use the helper script to sign every unsigned VC with the admin Ed25519 key:
    ```bash
-   cd api-gateway/api
-   go build ./cmd/vctool
-
-   cat > trainer-node-001_unsigned.json <<'EOF'
-   {
-     "issuer": "did:nebula:admin001",
-     "job_id": "job_2025_heart_model",
-     "subject": "did:nebula:hospitalA-node001",
-     "permissions": ["train", "commit"],
-     "valid_from": "2025-12-01T00:00:00Z",
-     "valid_until": "2026-12-31T00:00:00Z"
-   }
-   EOF
-
-   ./vctool -vc trainer-node-001_unsigned.json -key /path/to/admin_ed25519_sk.pem -out trainer-node-001_vc.json
+   cd api-gateway
+   node scripts/sign-trainer-vcs.js \
+     --key nodes-setup/keys/admin_ed25519_sk.pem \
+     --force   # optional overwrite
    ```
-   The output file already contains the canonical JSON plus the `signature` field.
+   Signed credentials land in `nodes-setup/vc-signed/<trainer-id>_vc.json`. Give each trainer its matching signed VC so it can call `/auth/register-trainer`.
 
 4. **Generate JWTs for registration and runtime.**
-   - **Trainer registration:** the trainer signs an HS256 JWT using the shared `AUTH_JWT_SECRET`. Set `sub` to the trainer identifier (e.g., `trainer-node-001`) and run `JWT_ALG=HS256 AUTH_JWT_SECRET="super-secret" node jwt.js`. This tells the gateway which subject to associate with the Fabric identity.
-   - **Runtime APIs:** the trainer signs Ed25519 JWTs using their private key, keeping the same `sub` as above so the gateway can look up the stored enrollment. Run `JWT_ALG=EdDSA TRAINER_PRIVATE_KEY=/path/to/trainer-node-001_sk.pem node jwt.js`. The output is the `Authorization: Bearer ...` header for `/data/commit` and `/data/<id>`.
+   - **Trainer registration:** HS256 JWT using the shared `AUTH_JWT_SECRET`. You can re-run `node jwt.js --sub trainer-node-001` with `JWT_ALG=HS256` and the secret exported, or reuse the pre-generated token from `nodes-setup/tokens/*_registration.jwt`.
+   - **Runtime APIs:** Ed25519 JWT signed with the trainer’s private key. Again you can re-run `node jwt.js --sub trainer-node-001` with `JWT_ALG=EdDSA TRAINER_PRIVATE_KEY=/path/to/sk.pem`, or reuse `*_runtime.jwt`. Keep the private key PEM on the trainer host.
 
 5. **Start the stack.**
    ```bash
@@ -86,6 +82,8 @@ Stop with `docker compose down -v`. If you do not want to export variables manua
 ## Authentication flow
 
 1. **Layer 1 (JWT):** every HTTP request supplies `Authorization: Bearer <token>`. Tokens use HS256, carry `sub`, `role`, and `exp` claims, and the gateway stores the resolved subject in the context for later lookups.
+   - The **registration token** proves the caller knows the shared bootstrap secret (`AUTH_JWT_SECRET`). Only this token is accepted on `/auth/register-trainer`.
+   - The **runtime token** proves the caller controls the trainer-specific Ed25519 key registered earlier. These are required for `/data/*` APIs.
 2. **Layer 2 (VC enrollment):** before a node can call any runtime API it must invoke `POST /auth/register-trainer` once. During this call the gateway:
    - Verifies the JWT and resolves `sub`.
    - Verifies the VC signature against `ADMIN_PUBLIC_KEY`. The VC is canonicalized (stable key ordering, no whitespace) before hashing/signing; a SHA256 hash of the signed VC (including the signature field) becomes `vc_hash` and is stored on-chain.
@@ -93,7 +91,7 @@ Stop with `docker compose down -v`. If you do not want to export variables manua
    - Maps the JWT subject to a Fabric wallet identity using the rule `trainer-<nodeId>` (non-alphanumeric characters collapse to `-`). The MSP material must live under `${ORG_CRYPTO_PATH}/users/<fabric-id>/msp`.
    - Calls the Fabric chaincode function `RegisterTrainer(did, nodeId, vcHash, publicKey)` signed by that identity.
    - Persists `{jwt_sub, fabric_client_id, nodeId, vc_hash, did, public_key}` inside `TRAINER_DB_PATH`.
-3. **Layer 2 (runtime checks):** `POST /data/commit` and `GET /data/<id>` first validate the JWT, then look up the stored enrollment. The JWT signature must be Ed25519/`EdDSA` using the same public key supplied at registration. After that the Fabric transaction is signed with the trainer’s MSP, and the chaincode enforces the on-chain whitelist. A stolen JWT alone is not enough to bypass authorization—you also need the Fabric MSP material.
+3. **Layer 2 (runtime checks):** `POST /data/commit` and `GET /data/<id>` first validate the JWT, then look up the stored enrollment. The JWT signature must be Ed25519/`EdDSA` using the same public key supplied at registration. After that the Fabric transaction is signed with the trainer’s MSP, and the chaincode enforces the on-chain whitelist. A stolen registration token won’t help here; runtime calls require the private key that matches the registered public key.
 
 ## HTTP API
 

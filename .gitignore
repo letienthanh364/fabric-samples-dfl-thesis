@@ -8,6 +8,10 @@
 .project
 # omit Go vendor directories
 vendor/
+!api-gateway/chaincode/asset-transfer-basic/vendor/
+!api-gateway/chaincode/asset-transfer-basic/vendor/**
+api-gateway/chaincode/asset-transfer-basic/.gomodcache/
+api-gateway/chaincode/asset-transfer-basic/.gopath/
 .vscode
 .gradle
 .idea
@@ -49,6 +53,7 @@ api-gateway/nodes-setup/*
 api-gateway/organizations/
 api-gateway/system-genesis-block/
 api-gateway/channel-artifacts
+api-gateway/chaincode/.gateway_hash
 
 # Fabric CA runtime artifacts and generated MSPs
 # api-gateway/organizations/fabric-ca/

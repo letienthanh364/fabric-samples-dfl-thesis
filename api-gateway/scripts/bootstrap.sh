@@ -13,9 +13,73 @@ ORDERER_CA=/organizations/ordererOrganizations/nebula.com/orderers/orderer.nebul
 GENESIS_CHANNEL_TX=/channel-artifacts/nebula-channel.tx
 CHANNEL_BLOCK=/channel-artifacts/${CHANNEL_NAME}.block
 READY_MARKER=${READY_MARKER:-/scripts/.bootstrap-ready}
+CC_HASH_FILE=${CHAINCODE_HASH_FILE:-/chaincode/.${CC_NAME}_hash}
+FORCE_CHAINCODE_REDEPLOY=${CHAINCODE_FORCE_REDEPLOY:-0}
+CHAINCODE_HASH=""
+COMMITTED_SEQUENCE=0
 
 log() {
   echo "[bootstrap] $1"
+}
+
+calculateChaincodeHash() {
+  if [ ! -d "${CC_SRC_PATH}" ]; then
+    echo ""
+    return
+  fi
+  tar --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner --sort=name \
+    -cf - -C "${CC_SRC_PATH}" . | sha256sum | awk '{print $1}'
+}
+
+recordChaincodeHash() {
+  if [ -z "${CHAINCODE_HASH}" ]; then
+    return
+  fi
+  echo "${CHAINCODE_HASH}" > "${CC_HASH_FILE}"
+}
+
+detectCommittedSequence() {
+  setGlobals 0
+  if peer lifecycle chaincode querycommitted --channelID ${CHANNEL_NAME} --name ${CC_NAME} > /tmp/committed_${CC_NAME}.txt 2>/tmp/committed_${CC_NAME}.err; then
+    local seq
+    seq=$(awk '/Sequence:/ {gsub(",", "", $2); print $2; exit}' /tmp/committed_${CC_NAME}.txt)
+    if [ -n "${seq}" ]; then
+      COMMITTED_SEQUENCE=${seq}
+    else
+      COMMITTED_SEQUENCE=0
+    fi
+  else
+    COMMITTED_SEQUENCE=0
+  fi
+}
+
+detectChaincodeChange() {
+  CHAINCODE_HASH=$(calculateChaincodeHash)
+  if [ "${FORCE_CHAINCODE_REDEPLOY}" = "1" ]; then
+    return
+  fi
+  if [ -z "${CHAINCODE_HASH}" ]; then
+    return
+  fi
+  if [ -f "${CC_HASH_FILE}" ]; then
+    local recorded
+    recorded=$(cat "${CC_HASH_FILE}")
+    if [ "${recorded}" = "${CHAINCODE_HASH}" ]; then
+      return
+    fi
+  fi
+  FORCE_CHAINCODE_REDEPLOY=1
+  log "chaincode source change detected; redeployment will be forced"
+}
+
+prepareChaincodeDeployment() {
+  detectCommittedSequence
+  detectChaincodeChange
+  if [ "${FORCE_CHAINCODE_REDEPLOY}" = "1" ] && [ "${COMMITTED_SEQUENCE}" -gt 0 ] && [ "${CC_SEQUENCE}" -le "${COMMITTED_SEQUENCE}" ]; then
+    local previous=${CC_SEQUENCE}
+    CC_SEQUENCE=$((COMMITTED_SEQUENCE + 1))
+    log "auto-incrementing chaincode sequence from ${previous} to ${CC_SEQUENCE}"
+  fi
 }
 
 setGlobals() {
@@ -79,10 +143,11 @@ joinChannel() {
 
 packageChaincode() {
   setGlobals 0
-  if [ -f ${CC_PACKAGE_PATH} ]; then
+  if [ "${FORCE_CHAINCODE_REDEPLOY}" != "1" ] && [ -f ${CC_PACKAGE_PATH} ]; then
     return
   fi
   log "packaging chaincode (${CC_LABEL})"
+  rm -f ${CC_PACKAGE_PATH}
   peer lifecycle chaincode package ${CC_PACKAGE_PATH} \
     --path ${CC_SRC_PATH} \
     --lang ${CC_RUNTIME_LANGUAGE} \
@@ -92,11 +157,15 @@ packageChaincode() {
 installChaincode() {
   for idx in 0 1 2; do
     setGlobals ${idx}
-    if peer lifecycle chaincode queryinstalled | grep -q ${CC_LABEL}; then
+    if [ "${FORCE_CHAINCODE_REDEPLOY}" != "1" ] && peer lifecycle chaincode queryinstalled | grep -q ${CC_LABEL}; then
       log "chaincode already installed on peer${idx}"
       continue
     fi
-    log "installing chaincode on peer${idx}"
+    if [ "${FORCE_CHAINCODE_REDEPLOY}" = "1" ]; then
+      log "reinstalling chaincode on peer${idx}"
+    else
+      log "installing chaincode on peer${idx}"
+    fi
     peer lifecycle chaincode install ${CC_PACKAGE_PATH}
   done
 }
@@ -104,13 +173,13 @@ installChaincode() {
 getPackageID() {
   setGlobals 0
   peer lifecycle chaincode queryinstalled > /tmp/installed_chaincodes.txt
-  PACKAGE_ID=$(grep ${CC_LABEL} /tmp/installed_chaincodes.txt | awk -F ',' '{print $1}' | awk '{print $3}')
+  PACKAGE_ID=$(grep ${CC_LABEL} /tmp/installed_chaincodes.txt | tail -n 1 | awk -F ',' '{print $1}' | awk '{print $3}')
   export PACKAGE_ID
 }
 
 approveChaincode() {
   setGlobals 0
-  if peer lifecycle chaincode checkcommitreadiness --channelID ${CHANNEL_NAME} --name ${CC_NAME} --version ${CC_VERSION} --sequence ${CC_SEQUENCE} --output json | grep -q '"Org1MSP": true'; then
+  if [ "${FORCE_CHAINCODE_REDEPLOY}" != "1" ] && peer lifecycle chaincode checkcommitreadiness --channelID ${CHANNEL_NAME} --name ${CC_NAME} --version ${CC_VERSION} --sequence ${CC_SEQUENCE} --output json | grep -q '"Org1MSP": true'; then
     log "chaincode already approved"
     return
   fi
@@ -128,7 +197,7 @@ approveChaincode() {
 }
 
 commitChaincode() {
-  if peer lifecycle chaincode querycommitted --channelID ${CHANNEL_NAME} --name ${CC_NAME} | grep -q "Sequence: ${CC_SEQUENCE}"; then
+  if [ "${FORCE_CHAINCODE_REDEPLOY}" != "1" ] && peer lifecycle chaincode querycommitted --channelID ${CHANNEL_NAME} --name ${CC_NAME} | grep -q "Sequence: ${CC_SEQUENCE}"; then
     log "chaincode already committed"
     return
   fi
@@ -144,6 +213,7 @@ commitChaincode() {
     --peerAddresses peer0.org1.nebula.com:7051 --tlsRootCertFiles /organizations/peerOrganizations/org1.nebula.com/peers/peer0.org1.nebula.com/tls/ca.crt \
     --peerAddresses peer1.org1.nebula.com:8051 --tlsRootCertFiles /organizations/peerOrganizations/org1.nebula.com/peers/peer1.org1.nebula.com/tls/ca.crt \
     --peerAddresses peer2.org1.nebula.com:9051 --tlsRootCertFiles /organizations/peerOrganizations/org1.nebula.com/peers/peer2.org1.nebula.com/tls/ca.crt
+  recordChaincodeHash
 }
 
 initializeLedger() {
@@ -166,6 +236,7 @@ main() {
   waitForPeer "orderer.nebula.com:7050" || true
   createChannel
   joinChannel
+  prepareChaincodeDeployment
   packageChaincode
   installChaincode
   getPackageID

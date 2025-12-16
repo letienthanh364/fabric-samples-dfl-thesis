@@ -117,8 +117,7 @@ func (c *GatewayContract) CommitData(ctx contractapi.TransactionContextInterface
 
 // ReadData returns a payload if the caller is authorized to access it.
 func (c *GatewayContract) ReadData(ctx contractapi.TransactionContextInterface, dataID string) (*DataRecord, error) {
-	trainer, err := c.requireAuthorizedTrainer(ctx)
-	if err != nil {
+	if _, err := c.requireAuthorizedTrainer(ctx); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(dataID) == "" {
@@ -135,9 +134,7 @@ func (c *GatewayContract) ReadData(ctx contractapi.TransactionContextInterface, 
 	if err := json.Unmarshal(payload, &record); err != nil {
 		return nil, err
 	}
-	if record.Owner != trainer.NodeID {
-		return nil, errTrainerUnauthorized
-	}
+	// Each authorized trainer is allowed to read any committed record.
 	return &record, nil
 }
 

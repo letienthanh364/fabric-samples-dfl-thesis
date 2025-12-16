@@ -72,9 +72,6 @@ func (s *Service) Retrieve(ctx context.Context, authCtx *common.AuthContext, dat
 	if err := json.Unmarshal(raw, &ledger); err != nil {
 		return nil, err
 	}
-	if ledger.Owner != "" && !strings.EqualFold(ledger.Owner, enrolment.NodeID) {
-		return nil, common.NewStatusError(http.StatusForbidden, "trainer not authorized for this record")
-	}
 	return &DataRecord{
 		DataID:      ledger.ID,
 		Payload:     ledger.Payload,

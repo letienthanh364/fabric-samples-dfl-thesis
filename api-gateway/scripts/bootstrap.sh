@@ -17,6 +17,9 @@ CC_HASH_FILE=${CHAINCODE_HASH_FILE:-/chaincode/.${CC_NAME}_hash}
 FORCE_CHAINCODE_REDEPLOY=${CHAINCODE_FORCE_REDEPLOY:-0}
 CHAINCODE_HASH=""
 COMMITTED_SEQUENCE=0
+# Space-delimited list of peer indices to use as commit endorsers (defaults to peer0 only).
+COMMIT_PEER_INDICES=${CHAINCODE_COMMIT_PEER_INDICES:-"0"}
+PEER_CONN_PARMS=()
 
 log() {
   echo "[bootstrap] $1"
@@ -90,6 +93,19 @@ setGlobals() {
   export CORE_PEER_MSPCONFIGPATH=/organizations/peerOrganizations/org1.nebula.com/users/Admin@org1.nebula.com/msp
   export CORE_PEER_TLS_ROOTCERT_FILE=/organizations/peerOrganizations/org1.nebula.com/peers/peer${PEER_INDEX}.org1.nebula.com/tls/ca.crt
   export CORE_PEER_ADDRESS=${PEER_ADDRESS}
+}
+
+buildPeerConnectionParameters() {
+  PEER_CONN_PARMS=()
+  for idx in ${COMMIT_PEER_INDICES}; do
+    local address="peer${idx}.org1.nebula.com:$((7051 + idx*1000))"
+    local tls_root="/organizations/peerOrganizations/org1.nebula.com/peers/peer${idx}.org1.nebula.com/tls/ca.crt"
+    PEER_CONN_PARMS+=("--peerAddresses" "${address}" "--tlsRootCertFiles" "${tls_root}")
+  done
+  if [ "${#PEER_CONN_PARMS[@]}" -eq 0 ]; then
+    # Default to peer0 when no valid indices are provided.
+    PEER_CONN_PARMS=(--peerAddresses peer0.org1.nebula.com:7051 --tlsRootCertFiles /organizations/peerOrganizations/org1.nebula.com/peers/peer0.org1.nebula.com/tls/ca.crt)
+  fi
 }
 
 waitForPeer() {
@@ -202,6 +218,7 @@ commitChaincode() {
     return
   fi
   log "committing chaincode"
+  buildPeerConnectionParameters
   peer lifecycle chaincode commit \
     -o orderer.nebula.com:7050 \
     --ordererTLSHostnameOverride orderer.nebula.com \
@@ -210,9 +227,7 @@ commitChaincode() {
     --version ${CC_VERSION} \
     --sequence ${CC_SEQUENCE} \
     --tls --cafile ${ORDERER_CA} \
-    --peerAddresses peer0.org1.nebula.com:7051 --tlsRootCertFiles /organizations/peerOrganizations/org1.nebula.com/peers/peer0.org1.nebula.com/tls/ca.crt \
-    --peerAddresses peer1.org1.nebula.com:8051 --tlsRootCertFiles /organizations/peerOrganizations/org1.nebula.com/peers/peer1.org1.nebula.com/tls/ca.crt \
-    --peerAddresses peer2.org1.nebula.com:9051 --tlsRootCertFiles /organizations/peerOrganizations/org1.nebula.com/peers/peer2.org1.nebula.com/tls/ca.crt
+    "${PEER_CONN_PARMS[@]}"
   recordChaincodeHash
 }
 

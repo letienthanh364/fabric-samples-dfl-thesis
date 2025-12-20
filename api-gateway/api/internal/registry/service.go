@@ -75,7 +75,11 @@ func (s *Service) Register(ctx context.Context, authCtx *common.AuthContext, inp
 	canonicalPublicKey := base64.StdEncoding.EncodeToString(pubKeyBytes)
 	fabricID := buildFabricClientID(nodeID)
 	args := []string{"RegisterTrainer", did, nodeID, verified.Hash, canonicalPublicKey}
-	if err := s.fabric.InvokeChaincode(s.cfg.DefaultPeer, fabricID, args); err != nil {
+	peerName := s.fabric.SelectPeer()
+	if peerName == "" {
+		return nil, common.NewStatusError(http.StatusInternalServerError, "no fabric peers configured")
+	}
+	if err := s.fabric.InvokeChaincode(peerName, fabricID, args); err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)

@@ -40,7 +40,11 @@ func (s *Service) Commit(ctx context.Context, authCtx *common.AuthContext, paylo
 	}
 	dataID := generateDataID()
 	args := []string{"CommitData", dataID, string(payload)}
-	if err := s.fabric.InvokeChaincode(s.cfg.DefaultPeer, enrolment.FabricClientID, args); err != nil {
+	peerName := s.fabric.SelectPeer()
+	if peerName == "" {
+		return nil, common.NewStatusError(http.StatusInternalServerError, "no fabric peers configured")
+	}
+	if err := s.fabric.InvokeChaincode(peerName, enrolment.FabricClientID, args); err != nil {
 		return nil, err
 	}
 	return &CommitResult{
@@ -64,7 +68,11 @@ func (s *Service) Retrieve(ctx context.Context, authCtx *common.AuthContext, dat
 		return nil, common.NewStatusError(http.StatusBadRequest, "data identifier is required")
 	}
 	args := []string{"ReadData", dataID}
-	raw, err := s.fabric.QueryChaincode(s.cfg.DefaultPeer, enrolment.FabricClientID, args)
+	peerName := s.fabric.SelectPeer()
+	if peerName == "" {
+		return nil, common.NewStatusError(http.StatusInternalServerError, "no fabric peers configured")
+	}
+	raw, err := s.fabric.QueryChaincode(peerName, enrolment.FabricClientID, args)
 	if err != nil {
 		return nil, err
 	}

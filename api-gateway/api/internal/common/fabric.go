@@ -5,17 +5,21 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
+	"sync/atomic"
 	"time"
 )
 
 // FabricClient shells out to the Fabric peer CLI to submit/evaluate chaincode transactions.
 type FabricClient struct {
-	cfg *Config
+	cfg       *Config
+	peerNames []string
+	peerIndex uint32
 }
 
 // NewFabricClient wires a FabricClient with the gateway configuration.
 func NewFabricClient(cfg *Config) *FabricClient {
-	return &FabricClient{cfg: cfg}
+	return &FabricClient{cfg: cfg, peerNames: buildPeerOrder(cfg)}
 }
 
 // Config exposes the underlying configuration.
@@ -26,10 +30,7 @@ func (f *FabricClient) Config() *Config {
 // WaitForChannelReady ensures at least one peer has joined the channel before serving traffic.
 func (f *FabricClient) WaitForChannelReady(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	peerNames := make([]string, 0, len(f.cfg.Peers))
-	for name := range f.cfg.Peers {
-		peerNames = append(peerNames, name)
-	}
+	peerNames := f.peerNames
 	if len(peerNames) == 0 {
 		return fmt.Errorf("no peers configured")
 	}
@@ -81,6 +82,16 @@ func (f *FabricClient) InvokeChaincode(peerName, identity string, args []string)
 	return err
 }
 
+// SelectPeer returns the next peer using a round-robin strategy.
+func (f *FabricClient) SelectPeer() string {
+	if len(f.peerNames) == 0 {
+		return ""
+	}
+	idx := atomic.AddUint32(&f.peerIndex, 1)
+	pos := int((idx - 1) % uint32(len(f.peerNames)))
+	return f.peerNames[pos]
+}
+
 func (f *FabricClient) runPeerCommand(peerName, identity string, args []string) ([]byte, error) {
 	peerCfg, ok := f.cfg.Peers[peerName]
 	if !ok {
@@ -106,4 +117,26 @@ func (f *FabricClient) runPeerCommand(peerName, identity string, args []string) 
 		return nil, fmt.Errorf("peer command failed: %s", cleaned)
 	}
 	return bytes.TrimSpace(output), nil
+}
+
+func buildPeerOrder(cfg *Config) []string {
+	if len(cfg.Peers) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Peers))
+	if cfg.DefaultPeer != "" {
+		if _, ok := cfg.Peers[cfg.DefaultPeer]; ok {
+			names = append(names, cfg.DefaultPeer)
+		}
+	}
+	var remaining []string
+	for name := range cfg.Peers {
+		if name == cfg.DefaultPeer {
+			continue
+		}
+		remaining = append(remaining, name)
+	}
+	sort.Strings(remaining)
+	names = append(names, remaining...)
+	return names
 }

@@ -67,3 +67,5 @@ api-gateway/chaincode/.gateway_hash
 
 # Gateway runtime data
 api-gateway/data/trainers.json
+
+api-gateway/nodes-setup/nodes/

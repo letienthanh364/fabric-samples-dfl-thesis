@@ -1,7 +1,7 @@
 # API Gateway Stack
 
 1. A Verifiable Credential (VC)–aware enrollment endpoint that maps runtime JWTs to Fabric wallet identities and registers them on-chain.
-2. A tiny data-service with only two APIs – commit arbitrary payloads and retrieve them later using the ID returned at commit time.
+2. A scoped model-reference API layered by “cluster”, “state”, and “nation” with commit/list/retrieve operations plus pagination, alongside the original generic data commit/retrieve helpers for ad-hoc payloads.
 
 `docker-compose.yaml` still provisions the entire Fabric network (orderer + 3 peers), the bootstrap CLI, the gateway CLI, and the HTTP server in a single command so you can spin everything up with one `docker compose up` just like the original stack.
 
@@ -155,14 +155,14 @@ Stop with `docker compose down -v`. If you do not want to export variables manua
 | `DEFAULT_PEER` | `peer0` | Peer used for submits/queries. |
 | `AUTH_JWT_SECRET` | _(required)_ | Shared HS256 secret used to protect the `/auth/register-trainer` endpoint. Runtime APIs require per-trainer Ed25519 JWTs. |
 | `ADMIN_PUBLIC_KEY` | _(required)_ | Base64-encoded Ed25519 public key used to verify VC signatures. |
-| `TRAINER_DB_PATH` | `/data/trainers.json` | Location on disk where the gateway remembers enrolled trainers. Mount `./data:/data` (already configured) for persistence. |
+| `TRAINER_DB_PATH` | `/data/trainers.json` | Location on disk where the gateway remembers enrolled trainers. When unset the gateway tries `/data/trainers.json` first and then walks up from `cwd` to locate `./data/trainers.json`, so local runs automatically reuse the repo copy. Mount `./data:/data` (already configured) for persistence in Docker. |
 | `GATEWAY_JOB_ID` | empty | Optional job identifier – if set, the VC `job_id` must match this value. |
 
 `ADMIN_PUBLIC_KEY` expects the raw 32-byte Ed25519 public key (no PEM headers) encoded with standard base64—the same data produced by the quick start commands above.
 
 ## Authentication flow
 
-1. **Layer 1 (JWT):** every HTTP request supplies `Authorization: Bearer <token>`. Tokens use HS256, carry `sub`, `role`, and `exp` claims, and the gateway stores the resolved subject in the context for later lookups.
+1. **Layer 1 (JWT):** every HTTP request supplies `Authorization: Bearer <token>`. Tokens carry `sub`, `role`, and `exp` claims and can be HS256 (shared secret) or EdDSA (per-trainer keys) depending on the endpoint. Runtime tokens may set `sub` to either the trainer’s `jwt_sub` or the DID string—they both resolve to the same enrollment now.
    - The **registration token** proves the caller knows the shared bootstrap secret (`AUTH_JWT_SECRET`). Only this token is accepted on `/auth/register-trainer`.
    - The **runtime token** proves the caller controls the trainer-specific Ed25519 key registered earlier. These are required for `/data/*` APIs.
 2. **Layer 2 (VC enrollment):** before a node can call any runtime API it must invoke `POST /auth/register-trainer` once. During this call the gateway:
@@ -172,7 +172,7 @@ Stop with `docker compose down -v`. If you do not want to export variables manua
    - Maps the JWT subject to a Fabric wallet identity using the rule `trainer-<nodeId>` (non-alphanumeric characters collapse to `-`). The MSP material must live under `${ORG_CRYPTO_PATH}/users/<fabric-id>/msp`.
    - Calls the Fabric chaincode function `RegisterTrainer(did, nodeId, vcHash, publicKey)` signed by that identity.
    - Persists `{jwt_sub, fabric_client_id, nodeId, vc_hash, did, public_key}` inside `TRAINER_DB_PATH`.
-3. **Layer 2 (runtime checks):** `POST /data/commit` and `GET /data/<id>` first validate the JWT, then look up the stored enrollment. The JWT signature must be Ed25519/`EdDSA` using the same public key supplied at registration. After that the Fabric transaction is signed with the trainer’s MSP, and the chaincode enforces the on-chain whitelist. A stolen registration token won’t help here; runtime calls require the private key that matches the registered public key.
+3. **Layer 2 (runtime checks):** The data and model endpoints validate the EdDSA runtime token, resolve the trainer enrollment (by `jwt_sub` or DID), then sign Fabric transactions with that trainer’s MSP identity. Chaincode enforces the whitelist, so runtime calls still require the registered private key.
 
 ## HTTP API
 
@@ -305,9 +305,9 @@ Only the trainer that originally committed the data (same Fabric client identity
 The previous asset-transfer sample was replaced with a purpose-built contract (`chaincode/asset-transfer-basic/chaincode/gateway_contract.go`). It exposes:
 
 - `RegisterTrainer(did, nodeId, vcHash, publicKey)` → stores the trainer metadata keyed by the invoker’s Fabric `clientID`.
-- `CommitData(dataId, payload)` → requires the invoker to be authorized, then writes the payload and metadata.
-- `ReadData(dataId)` → returns the stored payload but only if the caller is the same trainer that originally committed it.
-- `IsTrainerAuthorized()` helper used by future chaincode functions.
+- `CommitData(dataId, payload)` / `ReadData(dataId)` → legacy helpers for arbitrary payloads.
+- `CommitModel(dataId, layer, scopeId, payload)`, `ReadModel(dataId)`, and `ListModels(layer, scopeId, page, perPage)` → scoped model reference handling with pagination.
+- `IsTrainerAuthorized()` helper shared by the read/write functions.
 
 The bootstrap CLI now packages this chaincode under the label `gateway` so the API and Fabric stay in sync.
 
@@ -315,7 +315,92 @@ The bootstrap CLI now packages this chaincode under the label `gateway` so the A
 
 - **Chaincode:** bump `CHAINCODE_VERSION`/`CHAINCODE_SEQUENCE` and rerun `/scripts/bootstrap.sh` inside `gateway-cli`. Example: `docker exec gateway-cli bash -c 'CHAINCODE_VERSION=1.1 CHAINCODE_SEQUENCE=2 /scripts/bootstrap.sh'`.
 - **API:** `docker compose build api-gateway && docker compose up -d api-gateway`.
-- **Smoke test:** after the stack is up, call `GET /health`, then register a trainer with the VC JSON and JWT you prepared, and finally hit `POST /data/commit` followed by `GET /data/<id>` to ensure the ledger roundtrip works end-to-end.
+- **Smoke test:** after the stack is up, call `GET /health`, register a trainer with the VC JSON and JWT you prepared, then hit `POST /cluster/models` (or state/nation) followed by `GET /cluster/models/<id>` to verify the layered endpoint. `POST /data/commit` and `GET /data/<id>` still work for ad-hoc payloads.
 
 Everything still runs behind the single compose file, so the workflow stays the same as `nebula-gateway` while giving you a trimmed, VC-hardened API surface.
 > **Note:** The Fabric containers mount `./organizations/**` from your host. If you cloned a trimmed repo or wiped that directory, regenerate MSP material (via `cryptogen` or the CA flow above) *before* running `docker compose up`; otherwise the peers/orderer will crash with “could not load a valid signer certificate.”
+### Commit model reference
+
+Each layer gets its own endpoint: `/cluster/models`, `/state/models`, `/nation/models`. The body must include the payload plus the scope identifier expected by the layer:
+
+```
+POST /state/models
+Authorization: Bearer <runtime EdDSA JWT>
+Content-Type: application/json
+
+{
+  "state_id": "state-41",
+  "payload": {
+    "artifact_hash": "sha256:9f57...",
+    "dataset": "mnist-v1",
+    "train_accuracy": 0.982
+  }
+}
+```
+
+You can also provide a generic `scope_id`/`scopeId` field instead of the layer-specific key. The response mirrors `POST /data/commit` but includes layer/scope metadata:
+
+```json
+{
+  "data_id": "model-1a2b3c...",
+  "layer": "state",
+  "scope_id": "state-41",
+  "node_id": "trainer-node-001",
+  "vc_hash": "1bc9...",
+  "submitted_at": "2025-01-02T03:04:05Z"
+}
+```
+
+### Retrieve model reference
+
+```
+GET /state/models/<data_id>
+Authorization: Bearer <runtime EdDSA JWT>
+```
+
+Response:
+
+```json
+{
+  "data_id": "model-1a2b3c...",
+  "layer": "state",
+  "scope_id": "state-41",
+  "owner": "trainer-node-001",
+  "payload": { ... },
+  "submitted_at": "2025-01-02T03:04:05Z"
+}
+```
+
+### List model references
+
+```
+GET /state/models?scopeId=state-41&page=2
+Authorization: Bearer <runtime EdDSA JWT>
+```
+
+Parameters:
+- `scopeId` (optional) filters to a specific cluster/state/nation ID. When omitted you receive every record for that layer.
+- `page` (optional) defaults to `1`. Page size is fixed at 10 items.
+
+Response:
+
+```json
+{
+  "items": [
+    {
+      "data_id": "model-...",
+      "layer": "state",
+      "scope_id": "state-41",
+      "owner": "trainer-node-001",
+      "payload": {...},
+      "submitted_at": "..."
+    }
+  ],
+  "page": 2,
+  "per_page": 10,
+  "total": 17,
+  "has_more": true
+}
+```
+
+Additional layers can be added server-side without changing the HTTP surface—new `/layer/models` routes are registered automatically.

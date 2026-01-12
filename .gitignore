@@ -69,3 +69,4 @@ api-gateway/chaincode/.gateway_hash
 api-gateway/data/trainers.json
 
 api-gateway/nodes-setup/nodes/
+report-contents/

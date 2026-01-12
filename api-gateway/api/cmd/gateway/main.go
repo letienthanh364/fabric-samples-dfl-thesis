@@ -9,6 +9,7 @@ import (
 
 	"github.com/nebula/api-gateway/internal/common"
 	"github.com/nebula/api-gateway/internal/data"
+	"github.com/nebula/api-gateway/internal/models"
 	"github.com/nebula/api-gateway/internal/registry"
 )
 
@@ -36,11 +37,13 @@ func main() {
 
 	regSvc := registry.NewService(cfg, fabric, store, verifier)
 	dataSvc := data.NewService(cfg, fabric, store)
+	modelSvc := models.NewService(cfg, fabric, store)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler(cfg))
 	registry.NewHTTPHandler(regSvc).RegisterRoutes(mux, auth)
 	data.NewHTTPHandler(dataSvc, store).RegisterRoutes(mux, auth)
+	models.NewHTTPHandler(modelSvc, store).RegisterRoutes(mux, auth)
 
 	port := os.Getenv("PORT")
 	if port == "" {

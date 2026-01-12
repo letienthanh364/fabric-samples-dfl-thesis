@@ -2,10 +2,7 @@ package data
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -38,7 +35,7 @@ func (s *Service) Commit(ctx context.Context, authCtx *common.AuthContext, paylo
 	if !ok {
 		return nil, common.NewStatusError(http.StatusForbidden, "trainer not registered")
 	}
-	dataID := generateDataID()
+	dataID := common.GeneratePrefixedID("data")
 	args := []string{"CommitData", dataID, string(payload)}
 	peerName := s.fabric.SelectPeer()
 	if peerName == "" {
@@ -86,15 +83,6 @@ func (s *Service) Retrieve(ctx context.Context, authCtx *common.AuthContext, dat
 		Owner:       ledger.Owner,
 		SubmittedAt: ledger.SubmittedAt,
 	}, nil
-}
-
-func generateDataID() string {
-	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		// Fallback to timestamp to keep ID generation moving.
-		return fmt.Sprintf("data-%d", time.Now().UnixNano())
-	}
-	return "data-" + hex.EncodeToString(buf[:])
 }
 
 // CommitResult describes the API response for commits.

@@ -29,6 +29,7 @@ type Store struct {
 	mu         sync.RWMutex
 	byJWT      map[string]*TrainerRecord
 	byFabricID map[string]*TrainerRecord
+	byDID      map[string]*TrainerRecord
 }
 
 // NewStore loads existing records from disk, creating an empty store if the file doesn't exist.
@@ -37,6 +38,7 @@ func NewStore(path string) (*Store, error) {
 		path:       path,
 		byJWT:      map[string]*TrainerRecord{},
 		byFabricID: map[string]*TrainerRecord{},
+		byDID:      map[string]*TrainerRecord{},
 	}
 	if err := s.load(); err != nil {
 		return nil, err
@@ -60,10 +62,7 @@ func (s *Store) load() error {
 		if rec == nil || rec.JWTSub == "" {
 			continue
 		}
-		s.byJWT[rec.JWTSub] = rec
-		if rec.FabricClientID != "" {
-			s.byFabricID[rec.FabricClientID] = rec
-		}
+		s.indexRecord(rec)
 	}
 	return nil
 }
@@ -78,23 +77,48 @@ func (s *Store) Save(record *TrainerRecord) error {
 	if existing, ok := s.byFabricID[record.FabricClientID]; ok && existing.JWTSub != record.JWTSub {
 		return errors.New("fabric identity already assigned to another trainer")
 	}
-	s.byJWT[record.JWTSub] = record
+	s.indexRecord(record)
+	return s.persistLocked()
+}
+
+func (s *Store) indexRecord(record *TrainerRecord) {
+	jwtKey := strings.TrimSpace(record.JWTSub)
+	if jwtKey != "" {
+		s.byJWT[jwtKey] = record
+	}
 	if record.FabricClientID != "" {
 		s.byFabricID[record.FabricClientID] = record
 	}
-	return s.persistLocked()
+	did := strings.TrimSpace(record.DID)
+	if did != "" {
+		s.byDID[did] = record
+	}
 }
 
 // FindByJWTSub returns the enrollment for the provided JWT subject.
 func (s *Store) FindByJWTSub(jwtSub string) (*TrainerRecord, bool) {
+	key := strings.TrimSpace(jwtSub)
+	if key == "" {
+		return nil, false
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rec, ok := s.byJWT[jwtSub]
-	if !ok {
+	rec := s.lookupLocked(key)
+	if rec == nil {
 		return nil, false
 	}
 	clone := *rec
 	return &clone, true
+}
+
+func (s *Store) lookupLocked(key string) *TrainerRecord {
+	if rec, ok := s.byJWT[key]; ok {
+		return rec
+	}
+	if rec, ok := s.byDID[key]; ok {
+		return rec
+	}
+	return nil
 }
 
 func (s *Store) persistLocked() error {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,9 +35,29 @@ type DataRecord struct {
 	SubmittedAt string `json:"submitted_at"`
 }
 
+// ModelRecord describes a scoped model reference.
+type ModelRecord struct {
+	ID          string `json:"id"`
+	Layer       string `json:"layer"`
+	ScopeID     string `json:"scope_id"`
+	Owner       string `json:"owner"`
+	Payload     string `json:"payload"`
+	SubmittedAt string `json:"submitted_at"`
+}
+
+// ModelListPage represents a single page of model references.
+type ModelListPage struct {
+	Items   []*ModelRecord `json:"items"`
+	Page    int            `json:"page"`
+	PerPage int            `json:"per_page"`
+	Total   int            `json:"total"`
+	HasMore bool           `json:"has_more"`
+}
+
 const (
 	trainerPrefix = "trainer:"
 	dataPrefix    = "data:"
+	modelPrefix   = "model:"
 )
 
 // InitLedger is present for compatibility with the bootstrap script.
@@ -138,6 +159,145 @@ func (c *GatewayContract) ReadData(ctx contractapi.TransactionContextInterface, 
 	return &record, nil
 }
 
+// CommitModel stores a model reference scoped to a layer/scope identifier.
+func (c *GatewayContract) CommitModel(ctx contractapi.TransactionContextInterface, dataID, layer, scopeID, payload string) (*ModelRecord, error) {
+	trainer, err := c.requireAuthorizedTrainer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	id := strings.TrimSpace(dataID)
+	if id == "" {
+		return nil, errors.New("data identifier is required")
+	}
+	normalizedLayer := strings.ToLower(strings.TrimSpace(layer))
+	if normalizedLayer == "" {
+		return nil, errors.New("layer is required")
+	}
+	scope := strings.TrimSpace(scopeID)
+	if scope == "" {
+		return nil, errors.New("scope identifier is required")
+	}
+	record := &ModelRecord{
+		ID:          id,
+		Layer:       normalizedLayer,
+		ScopeID:     scope,
+		Owner:       trainer.NodeID,
+		Payload:     payload,
+		SubmittedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	bytes, err := json.Marshal(record)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.GetStub().PutState(modelKey(id), bytes); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// ReadModel returns a previously committed model reference.
+func (c *GatewayContract) ReadModel(ctx contractapi.TransactionContextInterface, dataID string) (*ModelRecord, error) {
+	if _, err := c.requireAuthorizedTrainer(ctx); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(dataID) == "" {
+		return nil, errors.New("data identifier is required")
+	}
+	payload, err := ctx.GetStub().GetState(modelKey(dataID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read model record: %w", err)
+	}
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("model %s not found", dataID)
+	}
+	var record ModelRecord
+	if err := json.Unmarshal(payload, &record); err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+// ListModels returns a page of model references filtered by layer/scope.
+func (c *GatewayContract) ListModels(ctx contractapi.TransactionContextInterface, layer, scopeID, pageArg, perPageArg string) (*ModelListPage, error) {
+	if _, err := c.requireAuthorizedTrainer(ctx); err != nil {
+		return nil, err
+	}
+	layerFilter := strings.ToLower(strings.TrimSpace(layer))
+	if layerFilter == "" {
+		return nil, errors.New("layer is required")
+	}
+	page := 1
+	if strings.TrimSpace(pageArg) != "" {
+		parsed, err := strconv.Atoi(pageArg)
+		if err != nil {
+			return nil, fmt.Errorf("invalid page parameter: %w", err)
+		}
+		if parsed < 1 {
+			return nil, errors.New("page must be >= 1")
+		}
+		page = parsed
+	}
+	perPage := 10
+	if strings.TrimSpace(perPageArg) != "" {
+		parsed, err := strconv.Atoi(perPageArg)
+		if err != nil {
+			return nil, fmt.Errorf("invalid perPage parameter: %w", err)
+		}
+		if parsed < 1 {
+			return nil, errors.New("perPage must be >= 1")
+		}
+		perPage = parsed
+	}
+	scopeFilter := strings.TrimSpace(scopeID)
+	startIndex := (page - 1) * perPage
+	items := make([]*ModelRecord, 0, perPage)
+
+	iter, err := ctx.GetStub().GetStateByRange(modelPrefix, modelPrefix+"~")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list models: %w", err)
+	}
+	defer iter.Close()
+
+	matched := 0
+	for iter.HasNext() {
+		kv, err := iter.Next()
+		if err != nil {
+			return nil, fmt.Errorf("failed to advance iterator: %w", err)
+		}
+		var record ModelRecord
+		if err := json.Unmarshal(kv.Value, &record); err != nil {
+			return nil, err
+		}
+		if record.ID == "" {
+			continue
+		}
+		if !strings.EqualFold(record.Layer, layerFilter) {
+			continue
+		}
+		if scopeFilter != "" && !strings.EqualFold(record.ScopeID, scopeFilter) {
+			continue
+		}
+		matched++
+		if matched <= startIndex {
+			continue
+		}
+		if len(items) >= perPage {
+			continue
+		}
+		copy := record
+		items = append(items, &copy)
+	}
+
+	hasMore := matched > startIndex+len(items)
+	return &ModelListPage{
+		Items:   items,
+		Page:    page,
+		PerPage: perPage,
+		Total:   matched,
+		HasMore: hasMore,
+	}, nil
+}
+
 var errTrainerUnauthorized = errors.New("trainer not authorized")
 
 func (c *GatewayContract) requireAuthorizedTrainer(ctx contractapi.TransactionContextInterface) (*Trainer, error) {
@@ -168,4 +328,8 @@ func trainerKey(clientID string) string {
 
 func dataKey(id string) string {
 	return dataPrefix + id
+}
+
+func modelKey(id string) string {
+	return modelPrefix + id
 }

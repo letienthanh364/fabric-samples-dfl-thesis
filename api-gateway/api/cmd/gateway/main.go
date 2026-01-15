@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nebula/api-gateway/internal/common"
+	"github.com/nebula/api-gateway/internal/convergence"
 	"github.com/nebula/api-gateway/internal/data"
 	"github.com/nebula/api-gateway/internal/models"
 	"github.com/nebula/api-gateway/internal/registry"
@@ -41,6 +42,7 @@ func main() {
 	dataSvc := data.NewService(cfg, fabric, store)
 	modelSvc := models.NewService(cfg, fabric, store)
 	whitelistSvc := whitelist.NewService(cfg, fabric)
+	convergenceSvc := convergence.NewService(cfg, fabric, store, whitelistSvc)
 
 	if err := regSvc.SyncWhitelist(context.Background()); err != nil {
 		log.Fatalf("failed to sync trainer whitelist: %v", err)
@@ -52,6 +54,7 @@ func main() {
 	data.NewHTTPHandler(dataSvc, store).RegisterRoutes(mux, auth)
 	models.NewHTTPHandler(modelSvc, store).RegisterRoutes(mux, auth)
 	whitelist.NewHTTPHandler(whitelistSvc).RegisterRoutes(mux, auth)
+	convergence.NewHTTPHandler(convergenceSvc).RegisterRoutes(mux, auth)
 
 	port := os.Getenv("PORT")
 	if port == "" {

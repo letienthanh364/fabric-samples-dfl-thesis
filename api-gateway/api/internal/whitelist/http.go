@@ -20,7 +20,7 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 
 // RegisterRoutes mounts the `/whitelist` endpoint.
 func (h *HTTPHandler) RegisterRoutes(mux *http.ServeMux, auth *common.Authenticator) {
-	mux.Handle("/whitelist", auth.RequireAuth(http.HandlerFunc(h.handleList), common.RoleAggregator, common.RoleAdmin))
+	mux.Handle("/whitelist", auth.RequireAuth(http.HandlerFunc(h.handleList), common.RoleAggregator, common.RoleAdmin, common.RoleCentralChecker))
 }
 
 func (h *HTTPHandler) handleList(w http.ResponseWriter, r *http.Request) {
@@ -55,5 +55,5 @@ func (h *HTTPHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		common.WriteErrorWithCode(w, status, err)
 		return
 	}
-	common.WriteJSON(w, http.StatusOK, result)
+	common.WriteJSON(w, http.StatusOK, result.ToHierarchy())
 }

@@ -21,6 +21,8 @@ type Trainer struct {
 	ClientID   string `json:"client_id"`
 	DID        string `json:"did"`
 	NodeID     string `json:"node_id"`
+	State      string `json:"state,omitempty"`
+	Cluster    string `json:"cluster,omitempty"`
 	VCHash     string `json:"vc_hash"`
 	PublicKey  string `json:"public_key"`
 	Status     string `json:"status"`
@@ -32,6 +34,8 @@ type WhitelistEntry struct {
 	JWTSub     string `json:"jwt_sub"`
 	DID        string `json:"did"`
 	NodeID     string `json:"node_id"`
+	State      string `json:"state,omitempty"`
+	Cluster    string `json:"cluster,omitempty"`
 	VCHash     string `json:"vc_hash"`
 	PublicKey  string `json:"public_key"`
 	Registered string `json:"registered_at"`
@@ -73,11 +77,47 @@ type WhitelistListPage struct {
 	HasMore bool              `json:"has_more"`
 }
 
+// ConvergenceRecord captures a convergence payload for a given scope.
+type ConvergenceRecord struct {
+	Scope       string `json:"scope"`
+	StateID     string `json:"state_id"`
+	ClusterID   string `json:"cluster_id,omitempty"`
+	SourceID    string `json:"source_id"`
+	Payload     string `json:"payload"`
+	SubmittedAt string `json:"submitted_at"`
+}
+
+// ConvergenceSummary declares that a scope is fully converged.
+type ConvergenceSummary struct {
+	Scope      string `json:"scope"`
+	TargetID   string `json:"target_id"`
+	DeclaredBy string `json:"declared_by"`
+	DeclaredAt string `json:"declared_at"`
+	Payload    string `json:"payload"`
+}
+
+// StateConvergence aggregates cluster convergence states for a state.
+type StateConvergence struct {
+	StateID  string                        `json:"state_id"`
+	Clusters map[string]*ConvergenceRecord `json:"clusters"`
+	Summary  *ConvergenceSummary           `json:"summary,omitempty"`
+}
+
+// NationConvergence aggregates state convergence states for the nation.
+type NationConvergence struct {
+	States  map[string]*ConvergenceRecord `json:"states"`
+	Summary *ConvergenceSummary           `json:"summary,omitempty"`
+}
+
 const (
-	trainerPrefix   = "trainer:"
-	dataPrefix      = "data:"
-	modelPrefix     = "model:"
-	whitelistPrefix = "whitelist:"
+	trainerPrefix      = "trainer:"
+	dataPrefix         = "data:"
+	modelPrefix        = "model:"
+	whitelistPrefix    = "whitelist:"
+	stateConvPrefix    = "conv:state:"
+	nationConvPrefix   = "conv:nation:"
+	clusterSuffix      = ":cluster:"
+	stateSummarySuffix = ":summary"
 )
 
 // InitLedger is present for compatibility with the bootstrap script.
@@ -86,7 +126,7 @@ func (c *GatewayContract) InitLedger(contractapi.TransactionContextInterface) er
 }
 
 // RegisterTrainer stores the trainer metadata keyed to the invoker identity.
-func (c *GatewayContract) RegisterTrainer(ctx contractapi.TransactionContextInterface, did, nodeID, vcHash, publicKey string) error {
+func (c *GatewayContract) RegisterTrainer(ctx contractapi.TransactionContextInterface, did, nodeID, vcHash, publicKey, state, cluster string) error {
 	if strings.TrimSpace(did) == "" {
 		return errors.New("did is required")
 	}
@@ -99,6 +139,8 @@ func (c *GatewayContract) RegisterTrainer(ctx contractapi.TransactionContextInte
 	if strings.TrimSpace(publicKey) == "" {
 		return errors.New("publicKey is required")
 	}
+	state = strings.TrimSpace(state)
+	cluster = strings.TrimSpace(cluster)
 	clientID, err := ctx.GetClientIdentity().GetID()
 	if err != nil {
 		return fmt.Errorf("failed to resolve client identity: %w", err)
@@ -107,6 +149,8 @@ func (c *GatewayContract) RegisterTrainer(ctx contractapi.TransactionContextInte
 		ClientID:   clientID,
 		DID:        did,
 		NodeID:     nodeID,
+		State:      state,
+		Cluster:    cluster,
 		VCHash:     vcHash,
 		PublicKey:  publicKey,
 		Status:     "AUTHORIZED",
@@ -319,7 +363,7 @@ func (c *GatewayContract) ListModels(ctx contractapi.TransactionContextInterface
 }
 
 // RecordWhitelistEntry upserts whitelist metadata keyed by JWT subject.
-func (c *GatewayContract) RecordWhitelistEntry(ctx contractapi.TransactionContextInterface, jwtSub, did, nodeID, vcHash, publicKey, registered string) error {
+func (c *GatewayContract) RecordWhitelistEntry(ctx contractapi.TransactionContextInterface, jwtSub, did, nodeID, state, cluster, vcHash, publicKey, registered string) error {
 	jwtSub = strings.TrimSpace(jwtSub)
 	if jwtSub == "" {
 		return errors.New("jwtSub is required")
@@ -330,6 +374,8 @@ func (c *GatewayContract) RecordWhitelistEntry(ctx contractapi.TransactionContex
 	if strings.TrimSpace(nodeID) == "" {
 		return errors.New("nodeId is required")
 	}
+	state = strings.TrimSpace(state)
+	cluster = strings.TrimSpace(cluster)
 	if strings.TrimSpace(vcHash) == "" {
 		return errors.New("vcHash is required")
 	}
@@ -344,6 +390,8 @@ func (c *GatewayContract) RecordWhitelistEntry(ctx contractapi.TransactionContex
 		JWTSub:     strings.ToLower(jwtSub),
 		DID:        did,
 		NodeID:     nodeID,
+		State:      state,
+		Cluster:    cluster,
 		VCHash:     vcHash,
 		PublicKey:  publicKey,
 		Registered: registeredAt,
@@ -420,6 +468,278 @@ func (c *GatewayContract) ListWhitelist(ctx contractapi.TransactionContextInterf
 	}, nil
 }
 
+// CommitStateClusterConvergence records convergence data for a specific cluster within a state.
+func (c *GatewayContract) CommitStateClusterConvergence(ctx contractapi.TransactionContextInterface, stateID, clusterID, payload string) (*ConvergenceRecord, error) {
+	trainer, err := c.requireAuthorizedTrainer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stateID, err = normalizeIdentifier(stateID, "stateId")
+	if err != nil {
+		return nil, err
+	}
+	clusterID, err = normalizeIdentifier(clusterID, "clusterId")
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(payload) == "" {
+		return nil, errors.New("payload is required")
+	}
+	record := &ConvergenceRecord{
+		Scope:       "state",
+		StateID:     stateID,
+		ClusterID:   clusterID,
+		SourceID:    trainer.NodeID,
+		Payload:     payload,
+		SubmittedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	bytes, err := json.Marshal(record)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.GetStub().PutState(stateClusterKey(stateID, clusterID), bytes); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// CommitNationStateConvergence records convergence data for a state toward the nation scope.
+func (c *GatewayContract) CommitNationStateConvergence(ctx contractapi.TransactionContextInterface, stateID, payload string) (*ConvergenceRecord, error) {
+	trainer, err := c.requireAuthorizedTrainer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stateID, err = normalizeIdentifier(stateID, "stateId")
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(payload) == "" {
+		return nil, errors.New("payload is required")
+	}
+	record := &ConvergenceRecord{
+		Scope:       "nation",
+		StateID:     stateID,
+		SourceID:    trainer.NodeID,
+		Payload:     payload,
+		SubmittedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	bytes, err := json.Marshal(record)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.GetStub().PutState(nationStateKey(stateID), bytes); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// DeclareStateConvergence marks an entire state as converged (first declaration wins).
+func (c *GatewayContract) DeclareStateConvergence(ctx contractapi.TransactionContextInterface, stateID, payload string) (*ConvergenceSummary, error) {
+	trainer, err := c.requireAuthorizedTrainer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stateID, err = normalizeIdentifier(stateID, "stateId")
+	if err != nil {
+		return nil, err
+	}
+	key := stateSummaryKey(stateID)
+	existing, err := ctx.GetStub().GetState(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read existing state convergence: %w", err)
+	}
+	if len(existing) > 0 {
+		return nil, fmt.Errorf("state %s already declared converged", stateID)
+	}
+	if strings.TrimSpace(payload) == "" {
+		return nil, errors.New("payload is required")
+	}
+	summary := &ConvergenceSummary{
+		Scope:      "state",
+		TargetID:   stateID,
+		DeclaredBy: trainer.NodeID,
+		DeclaredAt: time.Now().UTC().Format(time.RFC3339),
+		Payload:    payload,
+	}
+	bytes, err := json.Marshal(summary)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.GetStub().PutState(key, bytes); err != nil {
+		return nil, err
+	}
+	return summary, nil
+}
+
+// DeclareNationConvergence marks the nation as converged (first declaration wins).
+func (c *GatewayContract) DeclareNationConvergence(ctx contractapi.TransactionContextInterface, payload string) (*ConvergenceSummary, error) {
+	trainer, err := c.requireAuthorizedTrainer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	key := nationSummaryKey()
+	existing, err := ctx.GetStub().GetState(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read nation convergence: %w", err)
+	}
+	if len(existing) > 0 {
+		return nil, errors.New("nation convergence already declared")
+	}
+	if strings.TrimSpace(payload) == "" {
+		return nil, errors.New("payload is required")
+	}
+	summary := &ConvergenceSummary{
+		Scope:      "nation",
+		TargetID:   "nation",
+		DeclaredBy: trainer.NodeID,
+		DeclaredAt: time.Now().UTC().Format(time.RFC3339),
+		Payload:    payload,
+	}
+	bytes, err := json.Marshal(summary)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.GetStub().PutState(key, bytes); err != nil {
+		return nil, err
+	}
+	return summary, nil
+}
+
+// ReadStateConvergence loads convergence information for a specific state.
+func (c *GatewayContract) ReadStateConvergence(ctx contractapi.TransactionContextInterface, stateID string) (*StateConvergence, error) {
+	stateID, err := normalizeIdentifier(stateID, "stateId")
+	if err != nil {
+		return nil, err
+	}
+	result := &StateConvergence{
+		StateID:  stateID,
+		Clusters: map[string]*ConvergenceRecord{},
+	}
+	prefix := fmt.Sprintf("%s%s:", stateConvPrefix, stateID)
+	iter, err := ctx.GetStub().GetStateByRange(prefix, prefix+"~")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read state convergence: %w", err)
+	}
+	defer iter.Close()
+	for iter.HasNext() {
+		kv, err := iter.Next()
+		if err != nil {
+			return nil, err
+		}
+		if strings.HasSuffix(kv.Key, ":summary") {
+			var summary ConvergenceSummary
+			if err := json.Unmarshal(kv.Value, &summary); err != nil {
+				return nil, err
+			}
+			result.Summary = &summary
+			continue
+		}
+		if !strings.Contains(kv.Key, ":cluster:") {
+			continue
+		}
+		var record ConvergenceRecord
+		if err := json.Unmarshal(kv.Value, &record); err != nil {
+			return nil, err
+		}
+		if record.ClusterID == "" {
+			continue
+		}
+		result.Clusters[record.ClusterID] = &record
+	}
+	return result, nil
+}
+
+// ListStateConvergence returns convergence info for all states.
+func (c *GatewayContract) ListStateConvergence(ctx contractapi.TransactionContextInterface) (map[string]*StateConvergence, error) {
+	results := map[string]*StateConvergence{}
+	iter, err := ctx.GetStub().GetStateByRange(stateConvPrefix, stateConvPrefix+"~")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list state convergence: %w", err)
+	}
+	defer iter.Close()
+	for iter.HasNext() {
+		kv, err := iter.Next()
+		if err != nil {
+			return nil, err
+		}
+		stateID, kind, clusterID := parseStateConvergenceKey(kv.Key)
+		if stateID == "" {
+			continue
+		}
+		state, ok := results[stateID]
+		if !ok {
+			state = &StateConvergence{
+				StateID:  stateID,
+				Clusters: map[string]*ConvergenceRecord{},
+			}
+			results[stateID] = state
+		}
+		switch kind {
+		case "summary":
+			var summary ConvergenceSummary
+			if err := json.Unmarshal(kv.Value, &summary); err != nil {
+				return nil, err
+			}
+			state.Summary = &summary
+		case "cluster":
+			var record ConvergenceRecord
+			if err := json.Unmarshal(kv.Value, &record); err != nil {
+				return nil, err
+			}
+			if clusterID == "" {
+				clusterID = record.ClusterID
+			}
+			state.Clusters[clusterID] = &record
+		}
+	}
+	return results, nil
+}
+
+// ReadNationConvergence returns the convergence status for the nation.
+func (c *GatewayContract) ReadNationConvergence(ctx contractapi.TransactionContextInterface) (*NationConvergence, error) {
+	return c.listNationConvergence(ctx)
+}
+
+// ListNationConvergence exposes the detailed nation convergence map.
+func (c *GatewayContract) ListNationConvergence(ctx contractapi.TransactionContextInterface) (*NationConvergence, error) {
+	return c.listNationConvergence(ctx)
+}
+
+func (c *GatewayContract) listNationConvergence(ctx contractapi.TransactionContextInterface) (*NationConvergence, error) {
+	result := &NationConvergence{
+		States: map[string]*ConvergenceRecord{},
+	}
+	iter, err := ctx.GetStub().GetStateByRange(nationConvPrefix, nationConvPrefix+"~")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list nation convergence: %w", err)
+	}
+	defer iter.Close()
+	for iter.HasNext() {
+		kv, err := iter.Next()
+		if err != nil {
+			return nil, err
+		}
+		switch kind, stateID := parseNationConvergenceKey(kv.Key); kind {
+		case "summary":
+			var summary ConvergenceSummary
+			if err := json.Unmarshal(kv.Value, &summary); err != nil {
+				return nil, err
+			}
+			result.Summary = &summary
+		case "state":
+			var record ConvergenceRecord
+			if err := json.Unmarshal(kv.Value, &record); err != nil {
+				return nil, err
+			}
+			if stateID == "" {
+				stateID = record.StateID
+			}
+			result.States[stateID] = &record
+		}
+	}
+	return result, nil
+}
+
 var errTrainerUnauthorized = errors.New("trainer not authorized")
 
 func (c *GatewayContract) requireAuthorizedTrainer(ctx contractapi.TransactionContextInterface) (*Trainer, error) {
@@ -458,4 +778,70 @@ func modelKey(id string) string {
 
 func whitelistKey(jwtSub string) string {
 	return whitelistPrefix + strings.ToLower(strings.TrimSpace(jwtSub))
+}
+
+func stateClusterKey(stateID, clusterID string) string {
+	return fmt.Sprintf("%s%s:cluster:%s", stateConvPrefix, stateID, clusterID)
+}
+
+func stateSummaryKey(stateID string) string {
+	return fmt.Sprintf("%s%s:summary", stateConvPrefix, stateID)
+}
+
+func nationStateKey(stateID string) string {
+	return fmt.Sprintf("%sstate:%s", nationConvPrefix, stateID)
+}
+
+func nationSummaryKey() string {
+	return nationConvPrefix + "summary"
+}
+
+func normalizeIdentifier(value, field string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if v == "" {
+		return "", fmt.Errorf("%s is required", field)
+	}
+	return v, nil
+}
+
+func parseStateConvergenceKey(key string) (stateID, kind, clusterID string) {
+	if !strings.HasPrefix(key, stateConvPrefix) {
+		return "", "", ""
+	}
+	remainder := strings.TrimPrefix(key, stateConvPrefix)
+	parts := strings.Split(remainder, ":")
+	if len(parts) == 0 {
+		return "", "", ""
+	}
+	stateID = parts[0]
+	if len(parts) == 1 {
+		return stateID, "", ""
+	}
+	if parts[1] == "summary" {
+		return stateID, "summary", ""
+	}
+	if parts[1] == "cluster" && len(parts) >= 3 {
+		clusterID = strings.Join(parts[2:], ":")
+		return stateID, "cluster", clusterID
+	}
+	return stateID, "", ""
+}
+
+func parseNationConvergenceKey(key string) (kind, stateID string) {
+	if !strings.HasPrefix(key, nationConvPrefix) {
+		return "", ""
+	}
+	remainder := strings.TrimPrefix(key, nationConvPrefix)
+	parts := strings.Split(remainder, ":")
+	if len(parts) == 0 {
+		return "", ""
+	}
+	if parts[0] == "summary" {
+		return "summary", ""
+	}
+	if parts[0] == "state" && len(parts) >= 2 {
+		stateID = strings.Join(parts[1:], ":")
+		return "state", stateID
+	}
+	return "", ""
 }

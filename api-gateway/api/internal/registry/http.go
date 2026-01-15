@@ -32,6 +32,10 @@ type registerRequest struct {
 	PublicKey2      string          `json:"publicKey"`
 	JWTSubject      string          `json:"jwt_sub"`
 	SubjectOverride string          `json:"subject"`
+	State           string          `json:"state"`
+	StateID         string          `json:"state_id"`
+	Cluster         string          `json:"cluster"`
+	ClusterID       string          `json:"cluster_id"`
 }
 
 func (r *registerRequest) toInput() RegisterInput {
@@ -42,6 +46,8 @@ func (r *registerRequest) toInput() RegisterInput {
 	return RegisterInput{
 		DID:        r.DID,
 		NodeID:     r.NodeID,
+		State:      r.stateValue(),
+		Cluster:    r.clusterValue(),
 		VC:         r.VC,
 		PublicKey:  key,
 		JWTSubject: r.requestedSubject(),
@@ -67,6 +73,26 @@ func (r *registerRequest) fallbackSubject() string {
 	}
 	if sub := strings.TrimSpace(r.DID); sub != "" {
 		return sub
+	}
+	return ""
+}
+
+func (r *registerRequest) stateValue() string {
+	if val := strings.TrimSpace(r.StateID); val != "" {
+		return val
+	}
+	if val := strings.TrimSpace(r.State); val != "" {
+		return val
+	}
+	return ""
+}
+
+func (r *registerRequest) clusterValue() string {
+	if val := strings.TrimSpace(r.ClusterID); val != "" {
+		return val
+	}
+	if val := strings.TrimSpace(r.Cluster); val != "" {
+		return val
 	}
 	return ""
 }
@@ -102,6 +128,8 @@ func (h *HTTPHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"vc_hash":          record.VCHash,
 		"did":              record.DID,
 		"node_id":          record.NodeID,
+		"state":            record.State,
+		"cluster":          record.Cluster,
 		"registered_at":    record.RegisteredAt,
 	})
 }
@@ -110,6 +138,8 @@ type bulkRegisterResult struct {
 	DID            string `json:"did"`
 	NodeID         string `json:"nodeId"`
 	JWTSub         string `json:"jwt_sub"`
+	State          string `json:"state,omitempty"`
+	Cluster        string `json:"cluster,omitempty"`
 	Status         string `json:"status"`
 	Error          string `json:"error,omitempty"`
 	HTTPStatus     int    `json:"status_code,omitempty"`
@@ -180,6 +210,8 @@ func (h *HTTPHandler) handleBulkRegister(w http.ResponseWriter, r *http.Request)
 			DID:            record.DID,
 			NodeID:         record.NodeID,
 			JWTSub:         record.JWTSub,
+			State:          record.State,
+			Cluster:        record.Cluster,
 			Status:         "ok",
 			FabricClientID: record.FabricClientID,
 			VCHash:         record.VCHash,

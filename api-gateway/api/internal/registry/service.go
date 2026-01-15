@@ -26,6 +26,8 @@ type Service struct {
 type RegisterInput struct {
 	DID        string
 	NodeID     string
+	State      string
+	Cluster    string
 	VC         json.RawMessage
 	PublicKey  string
 	JWTSubject string
@@ -56,6 +58,11 @@ func (s *Service) Register(ctx context.Context, authCtx *common.AuthContext, inp
 	if nodeID == "" {
 		return nil, common.NewStatusError(http.StatusBadRequest, "nodeId is required")
 	}
+	state := strings.TrimSpace(input.State)
+	if state == "" {
+		return nil, common.NewStatusError(http.StatusBadRequest, "state is required")
+	}
+	cluster := strings.TrimSpace(input.Cluster)
 	publicKey := strings.TrimSpace(input.PublicKey)
 	if publicKey == "" {
 		return nil, common.NewStatusError(http.StatusBadRequest, "public_key is required")
@@ -74,7 +81,7 @@ func (s *Service) Register(ctx context.Context, authCtx *common.AuthContext, inp
 	}
 	canonicalPublicKey := base64.StdEncoding.EncodeToString(pubKeyBytes)
 	fabricID := buildFabricClientID(nodeID)
-	args := []string{"RegisterTrainer", did, nodeID, verified.Hash, canonicalPublicKey}
+	args := []string{"RegisterTrainer", did, nodeID, verified.Hash, canonicalPublicKey, state, cluster}
 	peerName := s.fabric.SelectPeer()
 	if peerName == "" {
 		return nil, common.NewStatusError(http.StatusInternalServerError, "no fabric peers configured")
@@ -88,6 +95,8 @@ func (s *Service) Register(ctx context.Context, authCtx *common.AuthContext, inp
 		FabricClientID: fabricID,
 		DID:            did,
 		NodeID:         nodeID,
+		State:          state,
+		Cluster:        cluster,
 		VCHash:         verified.Hash,
 		PublicKey:      canonicalPublicKey,
 		RegisteredAt:   now,
@@ -121,6 +130,8 @@ func (s *Service) recordWhitelistEntry(ctx context.Context, record *TrainerRecor
 		record.JWTSub,
 		record.DID,
 		record.NodeID,
+		record.State,
+		record.Cluster,
 		record.VCHash,
 		record.PublicKey,
 		record.RegisteredAt,

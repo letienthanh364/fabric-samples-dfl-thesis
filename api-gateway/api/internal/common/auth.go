@@ -18,9 +18,10 @@ import (
 type Role string
 
 const (
-	RoleTrainer    Role = "trainer"
-	RoleAggregator Role = "aggregator"
-	RoleAdmin      Role = "admin"
+	RoleTrainer        Role = "trainer"
+	RoleAggregator     Role = "aggregator"
+	RoleAdmin          Role = "admin"
+	RoleCentralChecker Role = "central_checker"
 )
 
 // AuthContext contains the caller identity resolved from the JWT.
@@ -28,6 +29,8 @@ type AuthContext struct {
 	Subject string
 	NodeID  string
 	State   string
+	Cluster string
+	Nation  string
 	Role    Role
 	Token   string
 	Claims  *JWTClaims
@@ -58,6 +61,8 @@ type TokenHeader struct {
 type JWTClaims struct {
 	Subject string      `json:"sub"`
 	State   string      `json:"state"`
+	Cluster string      `json:"cluster,omitempty"`
+	Nation  string      `json:"nation,omitempty"`
 	Role    string      `json:"role"`
 	Expiry  json.Number `json:"exp"`
 	Issued  json.Number `json:"iat,omitempty"`
@@ -150,10 +155,14 @@ func (a *Authenticator) parseToken(tokenString string, keyFunc KeyFunc) (*AuthCo
 	if subject == "" {
 		return nil, errors.New("token subject claim is required")
 	}
+	cluster := strings.TrimSpace(claims.Cluster)
+	nation := strings.TrimSpace(claims.Nation)
 	return &AuthContext{
 		Subject: subject,
 		NodeID:  subject,
 		State:   state,
+		Cluster: cluster,
+		Nation:  nation,
 		Role:    role,
 		Token:   tokenString,
 		Claims:  &claims,
@@ -234,6 +243,8 @@ func ParseRole(value string) (Role, error) {
 		return RoleAggregator, nil
 	case string(RoleAdmin):
 		return RoleAdmin, nil
+	case string(RoleCentralChecker):
+		return RoleCentralChecker, nil
 	default:
 		return "", fmt.Errorf("unknown role %s", value)
 	}

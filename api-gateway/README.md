@@ -3,6 +3,7 @@
 1. A Verifiable Credential (VC)–aware enrollment endpoint that maps runtime JWTs to Fabric wallet identities and registers them on-chain.
 2. A scoped model-reference API layered by “cluster”, “state”, and “nation” with commit/list/retrieve operations plus pagination, alongside the original generic data commit/retrieve helpers for ad-hoc payloads.
 3. A trainer whitelist feed so aggregators can fetch the canonical list of enrolled nodes straight from the ledger.
+4. Convergence services for “state” and “nation” scopes that track cluster/state convergence claims (individual and “all converged”) and expose status/list APIs.
 
 `docker-compose.yaml` still provisions the entire Fabric network (orderer + 3 peers), the bootstrap CLI, the gateway CLI, and the HTTP server in a single command so you can spin everything up with one `docker compose up` just like the original stack.
 
@@ -55,7 +56,7 @@ Follow these steps the first time you spin up the stack:
    Copy the single line from `admin_public_key.b64` into `.env` as `ADMIN_PUBLIC_KEY=...`. Keep `admin_ed25519_sk.pem` safe—you will use it to sign VCs.
 
 3. **Prepare trainer identities (automated).**
-   - Each trainer definition lives under `nodes-setup/nodes/node_X.json`. Update these files to change the list of trainer nodes or tweak per-node metadata (dataset parameters, topology hints, etc.). The `node_id` determines the trainer identifier used throughout the tooling (`trainer-node-XXX` naming is derived automatically).
+   - Each trainer definition lives under `nodes-setup/nodes/node_X.json`. Update these files to change the list of trainer nodes or tweak per-node metadata (dataset parameters, topology hints, etc.). Each entry must now include `state` and `cluster` identifiers so the whitelist and convergence modules can build the hierarchy (clusters roll up into states, which roll up into the nation). The `node_id` determines the trainer identifier used throughout the tooling (`trainer-node-XXX` naming is derived automatically).
    - To generate Ed25519 keypairs, unsigned VC payloads, and both JWT flavors for *all* trainers, run:
      ```bash
      # ensure AUTH_JWT_SECRET is exported or pass --auth-secret explicitly
@@ -163,7 +164,7 @@ Stop with `docker compose down -v`. If you do not want to export variables manua
 
 ## Authentication flow
 
-1. **Layer 1 (JWT):** every HTTP request supplies `Authorization: Bearer <token>`. Tokens carry `sub`, `role`, and `exp` claims and can be HS256 (shared secret) or EdDSA (per-trainer keys) depending on the endpoint. Runtime tokens may set `sub` to either the trainer’s `jwt_sub` or the DID string—they both resolve to the same enrollment now. Admin/aggregator-only APIs (e.g., `/whitelist`) keep using HS256 tokens signed with the shared `AUTH_JWT_SECRET`.
+1. **Layer 1 (JWT):** every HTTP request supplies `Authorization: Bearer <token>`. Tokens carry `sub`, `role`, and `exp` claims plus optional `state`, `cluster`, and `nation` hints so the API can determine topology without extra parameters. They can be HS256 (shared secret) or EdDSA (per-trainer keys) depending on the endpoint. Runtime tokens may set `sub` to either the trainer’s `jwt_sub` or the DID string—they both resolve to the same enrollment now. Admin/aggregator-only APIs (e.g., `/whitelist`, convergence lists) keep using HS256 tokens signed with the shared `AUTH_JWT_SECRET`. A new `central_checker` role governs the `<scope>/convergence/all` endpoints.
    - The **registration token** proves the caller knows the shared bootstrap secret (`AUTH_JWT_SECRET`). Only this token is accepted on `/auth/register-trainer`.
    - The **runtime token** proves the caller controls the trainer-specific Ed25519 key registered earlier. These are required for `/data/*` APIs.
 2. **Layer 2 (VC enrollment):** before a node can call any runtime API it must invoke `POST /auth/register-trainer` once. During this call the gateway:
@@ -207,6 +208,8 @@ Content-Type: application/json
 {
   "did": "did:nebula:trainer-node001",
   "nodeId": "trainer-node-001",
+  "state_id": "state-alpha",
+  "cluster_id": "cluster-01",
   "public_key": "<trainer public key base64>",
   "vc": { ... signed VC JSON ... }
 }
@@ -230,6 +233,7 @@ Failures:
 - Invalid/missing JWT → `401`.
 - VC signature mismatch, outside validity window, or DID/job mismatch → `403`.
 - Fabric invocation error (missing Fabric identity, ledger failure) → `500`.
+- Missing `state_id` or `cluster_id` → `400`. Every trainer must be tagged with its state/cluster so convergence and whitelist hierarchies stay in sync.
 
 ### Bulk register trainers (admin only)
 
@@ -309,6 +313,8 @@ The previous asset-transfer sample was replaced with a purpose-built contract (`
 - `CommitData(dataId, payload)` / `ReadData(dataId)` → legacy helpers for arbitrary payloads.
 - `CommitModel(dataId, layer, scopeId, payload)`, `ReadModel(dataId)`, and `ListModels(layer, scopeId, page, perPage)` → scoped model reference handling with pagination.
 - `RecordWhitelistEntry(jwtSub, did, nodeId, vcHash, publicKey, registeredAt)` / `ListWhitelist(page, perPage)` → mirrors the trainer whitelist keyed by JWT subject.
+- `CommitStateClusterConvergence(stateId, clusterId, payload)`, `CommitNationStateConvergence(stateId, payload)`, `DeclareStateConvergence(stateId, payload)`, and `DeclareNationConvergence(payload)` → convergence write paths.
+- `ReadStateConvergence(stateId)`, `ListStateConvergence()`, `ReadNationConvergence()`, and `ListNationConvergence()` → convergence queries for regular nodes and admins.
 - `IsTrainerAuthorized()` helper shared by the read/write functions.
 
 The bootstrap CLI now packages this chaincode under the label `gateway` so the API and Fabric stay in sync.
@@ -317,7 +323,7 @@ The bootstrap CLI now packages this chaincode under the label `gateway` so the A
 
 - **Chaincode:** bump `CHAINCODE_VERSION`/`CHAINCODE_SEQUENCE` and rerun `/scripts/bootstrap.sh` inside `gateway-cli`. Example: `docker exec gateway-cli bash -c 'CHAINCODE_VERSION=1.1 CHAINCODE_SEQUENCE=2 /scripts/bootstrap.sh'`.
 - **API:** `docker compose build api-gateway && docker compose up -d api-gateway`.
-- **Smoke test:** after the stack is up, call `GET /health`, register a trainer with the VC JSON and JWT you prepared, then hit `POST /cluster/models` (or state/nation) followed by `GET /cluster/models/<id>` to verify the layered endpoint. `POST /data/commit` / `GET /data/<id>` and `GET /whitelist` should all work to confirm the ledger + whitelist flow.
+- **Smoke test:** after the stack is up, call `GET /health`, register a trainer with the VC JSON and JWT you prepared, then hit `POST /cluster/models` (or state/nation) followed by `GET /cluster/models/<id>` to verify the layered endpoint. `POST /data/commit` / `GET /data/<id>`, `GET /whitelist`, and the new convergence endpoints (`POST /state/convergence`, `GET /state/convergence`, etc.) should all work to confirm the ledger flow end-to-end.
 
 Everything still runs behind the single compose file, so the workflow stays the same as `nebula-gateway` while giving you a trimmed, VC-hardened API surface.
 > **Note:** The Fabric containers mount `./organizations/**` from your host. If you cloned a trimmed repo or wiped that directory, regenerate MSP material (via `cryptogen` or the CA flow above) *before* running `docker compose up`; otherwise the peers/orderer will crash with “could not load a valid signer certificate.”
@@ -421,21 +427,131 @@ Response:
 
 ```json
 {
-  "items": [
+  "states": [
     {
-      "jwt_sub": "trainer-node-001",
-      "did": "did:nebula:trainer-node-001",
-      "node_id": "trainer-node-001",
-      "vc_hash": "1bc9...",
-      "public_key": "base64...",
-      "registered_at": "2025-01-02T03:04:05Z"
+      "state_id": "state-alpha",
+      "clusters": [
+        {
+          "cluster_id": "cluster-01",
+          "nodes": [
+            {
+              "jwt_sub": "trainer-node-001",
+              "did": "did:nebula:trainer-node-001",
+              "node_id": "trainer-node-001",
+              "state": "state-alpha",
+              "cluster": "cluster-01",
+              "vc_hash": "1bc9...",
+              "public_key": "base64...",
+              "registered_at": "2025-01-02T03:04:05Z"
+            }
+          ]
+        }
+      ]
     }
   ],
-  "page": 2,
-  "per_page": 25,
-  "total": 87,
-  "has_more": true
+  "page": 1,
+  "per_page": 50,
+  "total": 5,
+  "has_more": false
 }
 ```
 
-Every entry inside `data/trainers.json` is mirrored to the ledger at startup, and future registrations automatically append to that whitelist, so the endpoint above always returns the canonical trainer set. Only `admin` or `aggregator` JWT roles can call it.
+Every entry inside `data/trainers.json` is mirrored to the ledger at startup, and future registrations automatically append to that whitelist, so the endpoint above always returns the canonical trainer set grouped by state/cluster. Only `admin`, `aggregator`, or `central_checker` JWT roles can call it.
+
+### Convergence APIs
+
+The convergence service tracks whether each cluster (state scope) and each state (nation scope) has reported convergence.
+
+#### Submit cluster → state convergence
+
+```
+POST /state/convergence
+Authorization: Bearer <aggregator runtime JWT>
+Content-Type: application/json
+
+{
+  "state_id": "state-alpha",
+  "cluster_id": "cluster-01",
+  "payload": {
+    "cid": "bafybeia...",
+    "hash": "sha256:123...",
+    "accuracy": 0.982
+  }
+}
+```
+
+Cluster aggregators submit convergence payloads for the state scope. The `state_id`/`cluster_id` pair can come from the runtime token claims or directly from the request body. The payload blob is stored as-is on-chain so you can include whatever metadata makes sense (CID, hash, accuracy, etc.). Response: `201 {"status":"ok"}`.
+
+#### Submit state → nation convergence
+
+```
+POST /nation/convergence
+Authorization: Bearer <aggregator runtime JWT>
+
+{
+  "state_id": "state-alpha",
+  "payload": {
+    "cid": "...",
+    "accuracy": 0.995
+  }
+}
+```
+
+State aggregators submit convergence payloads toward the nation scope. Response mirrors the state endpoint.
+
+#### Declare “all converged”
+
+```
+POST /state/convergence/all
+Authorization: Bearer <central_checker runtime JWT>
+
+{
+  "state_id": "state-alpha",
+  "payload": {
+    "cid": "...",
+    "hash": "...",
+    "notes": "all clusters acknowledged"
+  }
+}
+```
+
+Central checkers can only declare “all converged” once per scope. Subsequent calls for the same state/nation return an error indicating the scope is already converged (the chaincode keeps the first declaration). Use `/nation/convergence/all` for the nation-wide summary. Responses are `201 {"status":"ok"}` when the declaration wins.
+
+#### Query convergence for the caller’s scope
+
+```
+GET /state/convergence?stateId=state-alpha
+Authorization: Bearer <any runtime JWT>
+```
+
+If `stateId` is omitted the gateway uses the `state` claim from the runtime token. Response:
+
+```json
+{
+  "state_id": "state-alpha",
+  "is_converged": true,
+  "converged_at": "2025-01-02T04:05:06Z",
+  "declared_by": "checker-node-01",
+  "summary_payload": {"cid":"...","notes":"..."},
+  "clusters": [
+    {
+      "cluster_id": "cluster-01",
+      "is_converged": true,
+      "submitted_at": "2025-01-02T03:00:00Z",
+      "source_id": "cluster-01-aggregator",
+      "payload": {"cid":"...","accuracy":0.982}
+    }
+  ]
+}
+```
+
+`GET /nation/convergence` returns a similar object for the nation scope with a `states` array describing each state’s contribution.
+
+#### Admin lists
+
+```
+GET /state/convergence/list
+Authorization: Bearer <admin HS256 JWT>
+```
+
+Returns a map of state IDs to `StateStatus` objects (same structure as the single-state endpoint). `GET /nation/convergence/list` returns the full nation map. Only `admin` tokens are allowed because the responses expose the entire network topology.

@@ -18,6 +18,8 @@ type TrainerRecord struct {
 	FabricClientID string `json:"fabric_client_id"`
 	DID            string `json:"did"`
 	NodeID         string `json:"node_id"`
+	State          string `json:"state,omitempty"`
+	Cluster        string `json:"cluster,omitempty"`
 	VCHash         string `json:"vc_hash"`
 	PublicKey      string `json:"public_key"`
 	RegisteredAt   string `json:"registered_at"`
